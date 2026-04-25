@@ -62,13 +62,14 @@ async def startup():
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     """Pagina principal - Upload y presupuesto."""
-    return templates.TemplateResponse("index.html", {
+    # Creamos el contexto explícitamente
+    context = {
         "request": request,
         "currency": CURRENCY,
         "currency_symbol": CURRENCY_SYMBOL,
         "public_url": PUBLIC_URL,
-    })
-
+    }
+    return templates.TemplateResponse(request=request, name="index.html", context=context)
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(request: Request):
