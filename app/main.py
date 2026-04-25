@@ -61,6 +61,7 @@ async def startup():
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
+    # Version: 1.0.1 - Limpieza de cache
     return templates.TemplateResponse(
         request=request, 
         name="index.html", 
