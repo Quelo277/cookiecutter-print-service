@@ -61,24 +61,26 @@ async def startup():
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """Pagina principal - Upload y presupuesto."""
-    # Creamos el contexto explícitamente
-    context = {
-        "request": request,
-        "currency": CURRENCY,
-        "currency_symbol": CURRENCY_SYMBOL,
-        "public_url": PUBLIC_URL,
-    }
-    return templates.TemplateResponse(request=request, name="index.html", context=context)
-
+    return templates.TemplateResponse(
+        request=request, 
+        name="index.html", 
+        context={
+            "request": request,
+            "currency": CURRENCY,
+            "currency_symbol": CURRENCY_SYMBOL,
+            "public_url": PUBLIC_URL,
+        }
+    )
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(request: Request):
-    """Panel administrativo - Listado de pedidos."""
-    return templates.TemplateResponse("admin.html", {
-        "request": request,
-        "currency_symbol": CURRENCY_SYMBOL,
-    })
-
+    return templates.TemplateResponse(
+        request=request, 
+        name="admin.html", 
+        context={
+            "request": request, 
+            "currency_symbol": CURRENCY_SYMBOL
+        }
+    )
 
 # ============================================================
 # API ENDPOINTS
