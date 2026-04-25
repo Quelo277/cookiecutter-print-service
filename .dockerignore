@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+*.egg
+.pytest_cache
+.mypy_cache
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Uploads y DB locales (se regeneran en el contenedor)
+frontend/static/uploads/
+db/*.db
+
+# Documentacion
+README.md
+*.md
+
+# Environment
+.env
+.env.*
