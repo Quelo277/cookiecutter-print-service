@@ -1,6 +1,6 @@
 """
-Pipeline de generacion STL para cortantes de galletas.
-Optimizado para Gema Makers: Imagen → Binarizar → SVG (Potrace) → OpenSCAD → STL
+Pipeline de generacion STL para cortantes de galletas - Gema Makers.
+Optimizado: Imagen → Binarizar → SVG (Potrace) → OpenSCAD (Estilo Papooch) → STL
 """
 import os
 import subprocess
@@ -46,7 +46,7 @@ def image_to_stl(
     handle_height: Optional[float] = None,
     handle_thickness: Optional[float] = None,
 ) -> dict:
-    """Pipeline principal: Imagen -> PNM -> SVG -> OpenSCAD -> STL"""
+    """Pipeline principal de generación."""
     wh = wall_height or WALL_HEIGHT
     wt = wall_thickness or WALL_THICKNESS
     hh = handle_height or HANDLE_HEIGHT
@@ -65,26 +65,26 @@ def image_to_stl(
     }
 
     try:
-        # 1. Binarizar con ImageMagick
+        # 1. Binarizar
         _binarize_image(image_path, paths["bnw_pnm"])
 
-        # 2. Vectorizar a SVG con Potrace
+        # 2. Vectorizar
         _vectorize_to_svg(paths["bnw_pnm"], paths["vector_svg"])
 
-        # 3. Generar archivo .scad
+        # 3. Generar SCAD (Lógica de dos piezas: Cortante + Sello)
         _generate_openscad_svg(
             paths["vector_svg"],
             paths["scad_file"],
             wh, wt, hh, ht
         )
 
-        # 4. Renderizar STL (OpenSCAD CLI)
+        # 4. Renderizar STL
         _render_stl(paths["scad_file"], paths["stl_file"])
 
-        # 5. Calcular volumen y dimensiones (Blindado para JSON)
+        # 5. Calcular volumen y dimensiones
         volumen_cm3, dimensiones = _calculate_volume(paths["stl_file"])
 
-        # 6. Generar imagen de preview
+        # 6. Preview
         _generate_preview(paths["scad_file"], paths["preview_png"])
 
         final_stl = str(STL_DIR / f"{output_name}.stl")
@@ -94,7 +94,7 @@ def image_to_stl(
             "stl_path": final_stl,
             "preview_path": paths["preview_png"],
             "volumen_cm3": round(volumen_cm3, 4),
-            "dimensiones": [round(d, 2) for d in dimensiones],  # Volvemos a 'dimensiones'
+            "dimensiones": [round(d, 2) for d in dimensiones], # Coincide con main.py
             "exito": True,
             "mensaje": "STL generado exitosamente",
             "parametros": {
@@ -132,10 +132,7 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
-    """
-    Generador de Cortante y Sello - Versión Final 'Gema Makers' 
-    Basado en lógica de encapsulado de contornos.
-    """
+    """Lógica estilo Papooch para Cortante + Sello separado."""
     scad_code = f"""
 $fn = 16;
 wall_height = {wh};
@@ -148,16 +145,14 @@ module original_svg() {{
     import("{svg_path}", center = true, dpi = 96);
 }}
 
-// --- PIEZA 1: CORTANTE EXTERIOR ---
+// PIEZA 1: CORTANTE EXTERIOR
 module pieza_cortante() {{
     union() {{
-        // La pared afilada que corta (crece hacia afuera del dibujo)
         linear_extrude(height = wall_height)
             difference() {{
                 offset(r = wall_thickness) original_svg();
                 original_svg();
             }}
-        // El mango de agarre (crece más hacia afuera)
         linear_extrude(height = handle_height)
             difference() {{
                 offset(r = handle_thickness) original_svg();
@@ -166,27 +161,22 @@ module pieza_cortante() {{
     }}
 }}
 
-// --- PIEZA 2: SELLO ESTAMPADOR (Independiente) ---
+// PIEZA 2: SELLO ESTAMPADOR
 module pieza_sello() {{
     translate([100, 0, 0]) {{
         union() {{
-            // PLACA BASE: Usamos offset negativo para que entre perfecto
             linear_extrude(height = 2)
                 offset(r = -tolerancia) original_svg();
             
-            // DETALLES: Los resaltamos para que marquen la masa
-            // Se usa un offset un poco mayor para asegurar que no se traben
             linear_extrude(height = 4)
                 offset(r = -tolerancia - 0.2) original_svg();
             
-            // SOPORTE TRASERO (Cilindro para apretar con el dedo)
             translate([0, 0, 2])
                 cylinder(h = wall_height - 2, r1 = 12, r2 = 8);
         }}
     }}
 }}
 
-// Ejecutar generación
 pieza_cortante();
 pieza_sello();
 """
@@ -196,7 +186,6 @@ pieza_sello();
 
 def _render_stl(scad_path: str, stl_path: str) -> None:
     cmd = ["openscad", "-o", stl_path, scad_path]
-    # Asegurate de que el timeout sea generoso (ej: 300 segundos)
     subprocess.run(cmd, check=True, capture_output=True, timeout=300)
 
 
@@ -204,9 +193,7 @@ def _calculate_volume(stl_path: str) -> Tuple[float, Tuple[float, float, float]]
     m = mesh.Mesh.from_file(stl_path)
     volume_mm3, _, _ = m.get_mass_properties()
     
-    # .item() o float() para que FastAPI no explote con NumPy
     vol_cm3 = float(volume_mm3 / 1000.0)
-    
     dims = (
         float(m.x.max() - m.x.min()),
         float(m.y.max() - m.y.min()),
@@ -218,7 +205,7 @@ def _calculate_volume(stl_path: str) -> Tuple[float, Tuple[float, float, float]]
 def _generate_preview(scad_path: str, preview_path: str) -> None:
     cmd = [
         "openscad", "-o", preview_path, 
-        "--imgsize=600,600", 
+        "--imgsize=800,800", 
         "--colorscheme=Starlight",
         scad_path
     ]
@@ -226,20 +213,12 @@ def _generate_preview(scad_path: str, preview_path: str) -> None:
 
 
 def calculate_price(volumen_cm3: float) -> dict:
-    """
-    Calcula el precio detallado para el frontend.
-    """
     from app.config import (
-        COSTO_FILAMENTO_POR_CM3, 
-        COSTO_BASE, 
-        MARGEN, 
-        CURRENCY, 
-        CURRENCY_SYMBOL
+        COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, 
+        CURRENCY, CURRENCY_SYMBOL
     )
     
-    # Aseguramos que volumen sea float nativo
     vol_cm3 = float(volumen_cm3)
-    
     costo_materiales = vol_cm3 * COSTO_FILAMENTO_POR_CM3
     precio_final = (costo_materiales + COSTO_BASE) * MARGEN
 
@@ -251,5 +230,4 @@ def calculate_price(volumen_cm3: float) -> dict:
         "precio_final": round(float(precio_final), 2),
         "moneda": CURRENCY,
         "simbolo": CURRENCY_SYMBOL,
-        "formula": f"({vol_cm3:.2f} * {COSTO_FILAMENTO_POR_CM3} + {COSTO_BASE}) * {MARGEN}"
     }
