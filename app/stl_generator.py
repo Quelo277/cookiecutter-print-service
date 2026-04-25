@@ -180,13 +180,30 @@ def _generate_preview(scad_path: str, preview_path: str) -> None:
 
 
 def calculate_price(volumen_cm3: float) -> dict:
+    """
+    Calcula el precio detallado para el frontend.
+    """
     from app.config import (
-        COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, 
-        CURRENCY, CURRENCY_SYMBOL
+        COSTO_FILAMENTO_POR_CM3, 
+        COSTO_BASE, 
+        MARGEN, 
+        CURRENCY, 
+        CURRENCY_SYMBOL
     )
-    costo_total = (volumen_cm3 * COSTO_FILAMENTO_POR_CM3 + COSTO_BASE) * MARGEN
+    
+    # Aseguramos que volumen sea float nativo
+    vol_cm3 = float(volumen_cm3)
+    
+    costo_materiales = vol_cm3 * COSTO_FILAMENTO_POR_CM3
+    precio_final = (costo_materiales + COSTO_BASE) * MARGEN
+
     return {
-        "precio_final": round(float(costo_total), 2),
+        "volumen_cm3": round(vol_cm3, 4),
+        "costo_materiales": round(float(costo_materiales), 2),
+        "costo_base": float(COSTO_BASE),
+        "margen": float(MARGEN),
+        "precio_final": round(float(precio_final), 2),
         "moneda": CURRENCY,
         "simbolo": CURRENCY_SYMBOL,
+        "formula": f"({vol_cm3:.2f} * {COSTO_FILAMENTO_POR_CM3} + {COSTO_BASE}) * {MARGEN}"
     }
