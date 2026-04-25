@@ -1,13 +1,14 @@
 import os
 import subprocess
 import shutil
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 from stl import mesh
 from PIL import Image
 
 from app.config import (
-    WALL_HEIGHT, WALL_THICKNESS, STL_DIR, 
+    WALL_HEIGHT, WALL_THICKNESS, STL_DIR, UPLOAD_DIR, PREVIEW_DIR,
     COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, CURRENCY, CURRENCY_SYMBOL
 )
 
@@ -19,15 +20,25 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
+def _cleanup_old_files(directory: Path, max_age_seconds: int = 3600):
+    """Borra archivos más viejos de 1 hora para salvar el disco del VPS."""
+    now = time.time()
+    for f in directory.iterdir():
+        if f.is_file() and (now - f.stat().st_mtime) > max_age_seconds:
+            try:
+                f.unlink()
+            except:
+                pass
+
 def _binarize_image(input_path: str, output_pnm: str) -> None:
-    # 1. Quitamos transparencia, aplanamos a blanco.
-    # 2. Shave 2x2 para quitar posibles bordes de 1px que detecta potrace.
-    # 3. Trim para ajustar a la figura y Border para darle aire limpio.
+    # 1. Forzamos fondo blanco y eliminamos cualquier rastro de transparencia.
+    # 2. -fuzz 10% -trim elimina bordes que no sean 100% blancos.
+    # 3. -shave elimina el perímetro físico por si hay una línea de 1px.
     subprocess.run([
         "convert", input_path,
         "-background", "white", "-flatten",
-        "-shave", "2x2",
-        "-trim", "+repage",
+        "-fuzz", "10%", "-trim", "+repage",
+        "-shave", "5x5", 
         "-bordercolor", "white", "-border", "10",
         "-threshold", "50%",
         "-negate", 
@@ -35,16 +46,26 @@ def _binarize_image(input_path: str, output_pnm: str) -> None:
     ], check=True)
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
-    # --turdsize 10 elimina ruidos pequeños
-    subprocess.run(["potrace", "-s", "--unit", "1", "--turdsize", "10", "-o", output_svg, bnw_pnm], check=True)
+    # --turdsize 20: ignora manchas pequeñas (menos ruido = OpenSCAD más rápido)
+    # --alphamax 0.5: simplifica curvas para evitar el Timeout
+    subprocess.run([
+        "potrace", "-s", "--unit", "1", 
+        "--turdsize", "20", 
+        "--alphamax", "0.5", 
+        "-o", output_svg, bnw_pnm
+    ], check=True)
 
 def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
+    # Limpieza preventiva de disco en cada uso
+    _cleanup_old_files(UPLOAD_DIR)
+    _cleanup_old_files(PREVIEW_DIR)
+    _cleanup_old_files(Path("/tmp"), 1800)
+
     wh = float(kwargs.get("wall_height") or WALL_HEIGHT)
     wt = float(kwargs.get("wall_thickness") or WALL_THICKNESS)
-    detail_height = wh * 0.6  # El interior es un 40% más bajo que el borde
+    detail_height = wh * 0.6 
 
-    # Usamos una subcarpeta única para limpiar fácil
-    work_dir = Path(f"/tmp/gema_tmp_{output_name}")
+    work_dir = Path(f"/tmp/gema_gen_{output_name}")
     work_dir.mkdir(parents=True, exist_ok=True)
 
     p = {
@@ -58,43 +79,39 @@ def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
         _binarize_image(image_path, p["pnm"])
         _vectorize_to_svg(p["pnm"], p["svg"])
 
-        # OpenSCAD: La pared de corte nace del borde del dibujo hacia AFUERA (offset wt)
+        # Optimizamos el SCAD para que no tarde tanto
         scad_code = f"""
-$fn = 32;
+$fn = 20; // Reducimos resolución para evitar Timeouts
 module silhouette() {{
     import("{p['svg']}", center=true, dpi=96);
 }}
 
-// 1. PARED DE CORTE (Altura total: {wh}mm)
-color("orange")
+// 1. CORTANTE EXTERIOR
 linear_extrude(height={wh})
     difference() {{
-        offset(r={wt + 0.5}) silhouette(); // Tolerancia de 0.5mm extra
-        silhouette();
+        offset(r={wt + 0.5}) silhouette();
+        offset(r=0.5) silhouette();
     }}
 
-// 2. SELLO INTERNO (Altura menor: {detail_height}mm)
-color("darkorange")
+// 2. DETALLE INTERNO
 linear_extrude(height={detail_height})
-    silhouette();
+    offset(r=0.5) silhouette();
 
-// 3. BASE SOPORTE (Opcional, muy fina para unir todo)
-linear_extrude(height=0.8)
-    offset(r={wt}) silhouette();
+// 3. SOPORTE DE UNIÓN
+linear_extrude(height=1.0)
+    offset(r={wt + 0.8}) silhouette();
 """
         with open(p["scad"], "w") as f:
             f.write(scad_code)
         
-        # Generar el STL
-        subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True, timeout=60)
+        # Aumentamos el timeout a 120s por las dudas, pero con $fn=20 debería volar.
+        subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True, timeout=120)
         
-        # Procesar para el presupuesto
         m = mesh.Mesh.from_file(p["stl"])
         volume_mm3, _, _ = m.get_mass_properties()
         vol_cm3 = float(volume_mm3) / 1000.0
         dims = [float(m.x.max() - m.x.min()), float(m.y.max() - m.y.min()), float(m.z.max() - m.z.min())]
 
-        # Guardamos el STL final
         shutil.copy2(p["stl"], str(STL_DIR / f"{output_name}.stl"))
         
         return {
@@ -103,15 +120,14 @@ linear_extrude(height=0.8)
             "volumen_cm3": round(vol_cm3, 4),
             "dimensiones": [round(d, 2) for d in dims],
             "stl_url": f"/api/download/{output_name}.stl",
-            "mensaje": "Modelo generado"
+            "mensaje": "OK"
         }
 
+    except subprocess.TimeoutExpired:
+        return {"exito": False, "mensaje": "La imagen es muy compleja y superó el tiempo de espera."}
     except Exception as e:
-        return {"exito": False, "mensaje": f"Error: {str(e)}"}
-    
+        return {"exito": False, "mensaje": str(e)}
     finally:
-        # --- LIMPIEZA CRÍTICA DE DISCO ---
-        # Borramos toda la carpeta temporal de trabajo
         if work_dir.exists():
             shutil.rmtree(work_dir)
 
