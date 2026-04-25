@@ -133,8 +133,8 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
     """
-    Versión Gema Makers v3: Lógica de relleno de contornos.
-    Asegura que el cortante sea solo el borde exterior y el sello una silueta sólida.
+    Versión Gema Makers v4 - Lógica de Silueta de Papooch.
+    Fuerza el vaciado de áreas externas para evitar el 'efecto bloque'.
     """
     scad_code = f"""
 $fn = 16;
@@ -144,52 +144,55 @@ handle_height = {hh};
 handle_thickness = {ht};
 tolerancia = 0.6;
 
-module silueta_rellena() {{
-    // fill() elimina los huecos internos (ojos, boca) 
-    // para obtener solo el contorno exterior limpio.
-    fill() import("{svg_path}", center = true, dpi = 96);
+// Módulo para limpiar el SVG de bordes fantasma
+module limpiar_svg() {{
+    // Usamos una intersección con un círculo gigante para 
+    // forzar a OpenSCAD a recalcular los polígonos del SVG
+    intersection() {{
+        import("{svg_path}", center = true, dpi = 96);
+        square([500, 500], center = true); 
+    }}
 }}
 
-module dibujo_original() {{
-    import("{svg_path}", center = true, dpi = 96);
+module silueta_base() {{
+    // fill() es vital: convierte contornos en formas sólidas
+    fill() limpiar_svg();
 }}
 
 // --- PIEZA 1: CORTANTE EXTERIOR ---
-// Solo sigue el borde externo del dibujo
 module pieza_cortante() {{
     union() {{
         // Pared de corte
         linear_extrude(height = wall_height)
             difference() {{
-                offset(r = wall_thickness) silueta_rellena();
-                silueta_rellena();
+                offset(r = wall_thickness) silueta_base();
+                silueta_base();
             }}
-        // Mango/Base
+        // Mango
         linear_extrude(height = handle_height)
             difference() {{
-                offset(r = handle_thickness) silueta_rellena();
-                silueta_rellena();
+                offset(r = handle_thickness) silueta_base();
+                silueta_base();
             }}
     }}
 }}
 
-// --- PIEZA 2: SELLO ESTAMPADOR ---
-// Genera una placa con la forma del dibujo y los detalles encima
+// --- PIEZA 2: SELLO (EL QUE FALLABA) ---
 module pieza_sello() {{
-    translate([100, 0, 0]) {{
+    translate([120, 0, 0]) {{
         union() {{
-            // 1. Placa base (la forma del personaje, un poco más chica)
+            // BASE DEL SELLO: Ahora es la silueta del chanchito, NO un bloque
             linear_extrude(height = 2)
-                offset(r = -tolerancia) silueta_rellena();
+                offset(r = -tolerancia) silueta_base();
             
-            // 2. Detalles internos (los que marcan la masa)
-            // Se proyectan desde la base
+            // DETALLES: Los ojos, nariz, etc.
+            // Los proyectamos sobre la base
             linear_extrude(height = 4)
-                offset(r = -tolerancia) dibujo_original();
+                offset(r = -tolerancia) limpiar_svg();
             
-            // 3. Agarre trasero
+            // SOPORTE PARA AGARRAR
             translate([0, 0, 2])
-                cylinder(h = wall_height - 2, r = 10);
+                cylinder(h = wall_height - 2, r = 8);
         }}
     }}
 }}
