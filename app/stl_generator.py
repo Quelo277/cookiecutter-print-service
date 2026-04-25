@@ -20,25 +20,29 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
-def _cleanup_old_files(directory: Path, max_age_seconds: int = 3600):
-    """Borra archivos más viejos de 1 hora para salvar el disco del VPS."""
+def _cleanup_vps_disk():
+    """Limpia archivos de más de 30 minutos para evitar que el VPS se llene."""
     now = time.time()
-    for f in directory.iterdir():
-        if f.is_file() and (now - f.stat().st_mtime) > max_age_seconds:
-            try:
-                f.unlink()
-            except:
-                pass
+    for folder in [UPLOAD_DIR, PREVIEW_DIR, Path("/tmp")]:
+        for f in folder.glob("*"):
+            if f.is_file() and (now - f.stat().st_mtime) > 1800:
+                try:
+                    # No borrar archivos esenciales del sistema en /tmp
+                    if "gema_gen_" in f.name or folder != Path("/tmp"):
+                        f.unlink()
+                except:
+                    pass
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
-    # 1. Forzamos fondo blanco y eliminamos cualquier rastro de transparencia.
-    # 2. -fuzz 10% -trim elimina bordes que no sean 100% blancos.
-    # 3. -shave elimina el perímetro físico por si hay una línea de 1px.
+    # ELIMINACIÓN AGRESIVA DEL RECTÁNGULO:
+    # 1. -shave 10x10: Corta 10 píxeles de todo el borde (elimina marcos de capturas)
+    # 2. -fuzz 15% -trim: Elimina bordes blancos no perfectos
+    # 3. -border 10: Agrega un margen blanco limpio para que potrace no toque los bordes
     subprocess.run([
         "convert", input_path,
         "-background", "white", "-flatten",
-        "-fuzz", "10%", "-trim", "+repage",
-        "-shave", "5x5", 
+        "-shave", "10x10",
+        "-fuzz", "15%", "-trim", "+repage",
         "-bordercolor", "white", "-border", "10",
         "-threshold", "50%",
         "-negate", 
@@ -46,24 +50,21 @@ def _binarize_image(input_path: str, output_pnm: str) -> None:
     ], check=True)
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
-    # --turdsize 20: ignora manchas pequeñas (menos ruido = OpenSCAD más rápido)
-    # --alphamax 0.5: simplifica curvas para evitar el Timeout
+    # --turdsize 50: Ignora motas de polvo y ruidos pequeños que ralentizan OpenSCAD
     subprocess.run([
         "potrace", "-s", "--unit", "1", 
-        "--turdsize", "20", 
-        "--alphamax", "0.5", 
+        "--turdsize", "50", 
+        "--alphamax", "0.3", # Simplifica curvas para evitar Timeouts
         "-o", output_svg, bnw_pnm
     ], check=True)
 
 def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
-    # Limpieza preventiva de disco en cada uso
-    _cleanup_old_files(UPLOAD_DIR)
-    _cleanup_old_files(PREVIEW_DIR)
-    _cleanup_old_files(Path("/tmp"), 1800)
+    # Limpieza automática en cada generación
+    _cleanup_vps_disk()
 
     wh = float(kwargs.get("wall_height") or WALL_HEIGHT)
     wt = float(kwargs.get("wall_thickness") or WALL_THICKNESS)
-    detail_height = wh * 0.6 
+    detail_height = wh * 0.55 # Un poco más bajo para que se note la diferencia
 
     work_dir = Path(f"/tmp/gema_gen_{output_name}")
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -79,33 +80,35 @@ def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
         _binarize_image(image_path, p["pnm"])
         _vectorize_to_svg(p["pnm"], p["svg"])
 
-        # Optimizamos el SCAD para que no tarde tanto
+        # El truco en OpenSCAD: La pared nace de la silueta hacia afuera.
         scad_code = f"""
-$fn = 20; // Reducimos resolución para evitar Timeouts
+$fn = 18; // Resolución optimizada para velocidad
 module silhouette() {{
     import("{p['svg']}", center=true, dpi=96);
 }}
 
-// 1. CORTANTE EXTERIOR
+// 1. PARED DE CORTE (Silueta + offset de 0.5mm de tolerancia)
+color("orange")
 linear_extrude(height={wh})
     difference() {{
         offset(r={wt + 0.5}) silhouette();
         offset(r=0.5) silhouette();
     }}
 
-// 2. DETALLE INTERNO
+// 2. SELLO INTERNO (El dibujo)
+color("darkorange")
 linear_extrude(height={detail_height})
-    offset(r=0.5) silhouette();
+    offset(r=0.4) silhouette();
 
-// 3. SOPORTE DE UNIÓN
-linear_extrude(height=1.0)
-    offset(r={wt + 0.8}) silhouette();
+// 3. BASE DE UNIÓN
+linear_extrude(height=0.8)
+    offset(r={wt + 1.0}) silhouette();
 """
         with open(p["scad"], "w") as f:
             f.write(scad_code)
         
-        # Aumentamos el timeout a 120s por las dudas, pero con $fn=20 debería volar.
-        subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True, timeout=120)
+        # Ejecución con tiempo límite
+        subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True, timeout=90)
         
         m = mesh.Mesh.from_file(p["stl"])
         volume_mm3, _, _ = m.get_mass_properties()
@@ -120,11 +123,9 @@ linear_extrude(height=1.0)
             "volumen_cm3": round(vol_cm3, 4),
             "dimensiones": [round(d, 2) for d in dims],
             "stl_url": f"/api/download/{output_name}.stl",
-            "mensaje": "OK"
+            "mensaje": "Generado correctamente"
         }
 
-    except subprocess.TimeoutExpired:
-        return {"exito": False, "mensaje": "La imagen es muy compleja y superó el tiempo de espera."}
     except Exception as e:
         return {"exito": False, "mensaje": str(e)}
     finally:
