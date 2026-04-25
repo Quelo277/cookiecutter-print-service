@@ -1,29 +1,30 @@
 FROM python:3.11-slim
 
-# 1. Instalamos las herramientas esenciales
-# Agregamos potrace y eliminamos pstoedit si quieres para limpiar
+# Instalar dependencias del sistema (Capa de S.O.)
 RUN apt-get update && apt-get install -y \
+    inkscape \
+    imagemagick \
     potrace \
     openscad \
-    imagemagick \
-    libgl1-mesa-dev \
+    libglu1-mesa \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Configuración de ImageMagick 7 (por si lo usas para redimensionar)
-RUN mkdir -p /etc/ImageMagick-7 && \
-    echo '<?xml version="1.0" encoding="UTF-8"?><policymap><policy domain="coder" rights="read|write" pattern="{PNG,JPEG,JPG,BMP}" /></policymap>' > /etc/ImageMagick-7/policy.xml
-
+# Establecer directorio de trabajo
 WORKDIR /app
 
+# Copiar requerimientos e instalar
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copiar el resto del código
 COPY . .
 
-# 3. Permisos de carpetas
-RUN mkdir -p /app/data /app/static/uploads/previews /app/static/uploads/stl /app/static/uploads/input && \
-    chmod -R 777 /app/static/uploads /app/data /tmp
+# Crear directorios necesarios para la app
+RUN mkdir -p /app/static/uploads/stl /app/static/uploads/previews /app/static/uploads/images
 
+# Puerto de FastAPI
 EXPOSE 8000
 
+# Comando para arrancar
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
