@@ -1,7 +1,3 @@
-"""
-Pipeline de generacion STL para cortantes de galletas - Gema Makers.
-Optimizado: Imagen → Binarizar → SVG (Potrace) → OpenSCAD (Estilo Papooch) → STL
-"""
 import os
 import subprocess
 import shutil
@@ -20,122 +16,46 @@ from app.config import (
     PREVIEW_DIR,
 )
 
-
 def validate_image(file_path: str) -> Tuple[bool, str]:
-    """Valida que la imagen sea JPG/PNG y tenga contraste."""
     try:
         img = Image.open(file_path)
         if img.format not in ("JPEG", "PNG", "JPG"):
             return False, f"Formato no soportado: {img.format}. Use JPG o PNG."
-
         img_gray = img.convert("L")
         arr = np.array(img_gray)
-        std = np.std(arr)
-        if std < 30:
-            return False, "La imagen tiene muy poco contraste. Usa fondo claro y figura oscura."
+        if np.std(arr) < 30:
+            return False, "La imagen tiene muy poco contraste."
         return True, "OK"
     except Exception as e:
-        return False, f"Error al procesar la imagen: {str(e)}"
-
-
-def image_to_stl(
-    image_path: str,
-    output_name: str,
-    wall_height: Optional[float] = None,
-    wall_thickness: Optional[float] = None,
-    handle_height: Optional[float] = None,
-    handle_thickness: Optional[float] = None,
-) -> dict:
-    """Pipeline principal de generación."""
-    wh = wall_height or WALL_HEIGHT
-    wt = wall_thickness or WALL_THICKNESS
-    hh = handle_height or HANDLE_HEIGHT
-    ht = handle_thickness or HANDLE_THICKNESS
-
-    work_dir = STL_DIR / output_name
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    paths = {
-        "input_image": image_path,
-        "bnw_pnm": str(work_dir / "input_bw.pnm"),
-        "vector_svg": str(work_dir / "vector.svg"),
-        "scad_file": str(work_dir / "cutter.scad"),
-        "stl_file": str(work_dir / "cutter.stl"),
-        "preview_png": str(PREVIEW_DIR / f"{output_name}.png"),
-    }
-
-    try:
-        # 1. Binarizar
-        _binarize_image(image_path, paths["bnw_pnm"])
-
-        # 2. Vectorizar
-        _vectorize_to_svg(paths["bnw_pnm"], paths["vector_svg"])
-
-        # 3. Generar SCAD (Lógica de dos piezas: Cortante + Sello)
-        _generate_openscad_svg(
-            paths["vector_svg"],
-            paths["scad_file"],
-            wh, wt, hh, ht
-        )
-
-        # 4. Renderizar STL
-        _render_stl(paths["scad_file"], paths["stl_file"])
-
-        # 5. Calcular volumen y dimensiones
-        volumen_cm3, dimensiones = _calculate_volume(paths["stl_file"])
-
-        # 6. Preview
-        _generate_preview(paths["scad_file"], paths["preview_png"])
-
-        final_stl = str(STL_DIR / f"{output_name}.stl")
-        shutil.copy2(paths["stl_file"], final_stl)
-
-        return {
-            "stl_path": final_stl,
-            "preview_path": paths["preview_png"],
-            "volumen_cm3": round(volumen_cm3, 4),
-            "dimensiones": [round(d, 2) for d in dimensiones], # Coincide con main.py
-            "exito": True,
-            "mensaje": "STL generado exitosamente",
-            "parametros": {
-                "wall_height": wh, 
-                "wall_thickness": wt, 
-                "handle_height": hh, 
-                "handle_thickness": ht
-            },
-        }
-
-    except Exception as e:
-        return {
-            "exito": False,
-            "mensaje": f"Error en pipeline STL: {str(e)}",
-            "volumen_cm3": 0.0,
-            "dimensiones": [0, 0, 0]
-        }
-
+        return False, str(e)
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
+    # Optimizamos para que Potrace detecte bien los bordes
     cmd = [
         "convert", input_path,
         "-resize", "1000x1000>",
         "-colorspace", "Gray",
+        "-negate", 
         "-threshold", "50%",
-        "-negate",
         output_pnm,
     ]
     subprocess.run(cmd, check=True, capture_output=True)
-
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
     cmd = ["potrace", "-s", "-o", output_svg, bnw_pnm]
     subprocess.run(cmd, check=True, capture_output=True)
 
+def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
+    """Simula el paso clave de Papooch usando Inkscape."""
+    cmd = [
+        "inkscape",
+        input_svg,
+        "--batch-process",
+        "--actions=select-all;path-combine;path-fill;export-filename:" + output_filled_svg + ";export-do",
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
 
-def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
-    """
-    Versión Gema Makers v4 - Lógica de Silueta de Papooch.
-    Fuerza el vaciado de áreas externas para evitar el 'efecto bloque'.
-    """
+def _generate_openscad_code(svg_path: str, filled_svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
     scad_code = f"""
 $fn = 16;
 wall_height = {wh};
@@ -144,55 +64,36 @@ handle_height = {hh};
 handle_thickness = {ht};
 tolerancia = 0.6;
 
-// Módulo para limpiar el SVG de bordes fantasma
-module limpiar_svg() {{
-    // Usamos una intersección con un círculo gigante para 
-    // forzar a OpenSCAD a recalcular los polígonos del SVG
-    intersection() {{
-        import("{svg_path}", center = true, dpi = 96);
-        square([500, 500], center = true); 
-    }}
-}}
+module original() {{ import("{svg_path}", center = true, dpi = 96); }}
+module rellena() {{ import("{filled_svg_path}", center = true, dpi = 96); }}
 
-module silueta_base() {{
-    // fill() es vital: convierte contornos en formas sólidas
-    fill() limpiar_svg();
-}}
-
-// --- PIEZA 1: CORTANTE EXTERIOR ---
+// PIEZA 1: CORTANTE (Usa la versión rellena para evitar el bloque rectangular)
 module pieza_cortante() {{
     union() {{
-        // Pared de corte
         linear_extrude(height = wall_height)
             difference() {{
-                offset(r = wall_thickness) silueta_base();
-                silueta_base();
+                offset(r = wall_thickness) rellena();
+                rellena();
             }}
-        // Mango
         linear_extrude(height = handle_height)
             difference() {{
-                offset(r = handle_thickness) silueta_base();
-                silueta_base();
+                offset(r = handle_thickness) rellena();
+                rellena();
             }}
     }}
 }}
 
-// --- PIEZA 2: SELLO (EL QUE FALLABA) ---
+// PIEZA 2: SELLO (Base sólida + detalles del original)
 module pieza_sello() {{
     translate([120, 0, 0]) {{
         union() {{
-            // BASE DEL SELLO: Ahora es la silueta del chanchito, NO un bloque
             linear_extrude(height = 2)
-                offset(r = -tolerancia) silueta_base();
+                offset(r = -tolerancia) rellena();
             
-            // DETALLES: Los ojos, nariz, etc.
-            // Los proyectamos sobre la base
-            linear_extrude(height = 4)
-                offset(r = -tolerancia) limpiar_svg();
-            
-            // SOPORTE PARA AGARRAR
-            translate([0, 0, 2])
-                cylinder(h = wall_height - 2, r = 8);
+            linear_extrude(height = 5)
+                offset(r = -tolerancia) original();
+
+            translate([0, 0, 2]) cylinder(h = wall_height - 2, r = 10);
         }}
     }}
 }}
@@ -203,51 +104,60 @@ pieza_sello();
     with open(scad_path, "w") as f:
         f.write(scad_code)
 
+def image_to_stl(image_path, output_name, **kwargs) -> dict:
+    wh = kwargs.get("wall_height") or WALL_HEIGHT
+    wt = kwargs.get("wall_thickness") or WALL_THICKNESS
+    hh = kwargs.get("handle_height") or HANDLE_HEIGHT
+    ht = kwargs.get("handle_thickness") or HANDLE_THICKNESS
 
-def _render_stl(scad_path: str, stl_path: str) -> None:
-    cmd = ["openscad", "-o", stl_path, scad_path]
-    subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    work_dir = STL_DIR / output_name
+    work_dir.mkdir(parents=True, exist_ok=True)
 
+    p = {
+        "pnm": str(work_dir / "temp.pnm"),
+        "svg": str(work_dir / "orig.svg"),
+        "filled": str(work_dir / "filled.svg"),
+        "scad": str(work_dir / "model.scad"),
+        "stl": str(work_dir / "model.stl"),
+        "preview": str(PREVIEW_DIR / f"{output_name}.png")
+    }
 
-def _calculate_volume(stl_path: str) -> Tuple[float, Tuple[float, float, float]]:
-    m = mesh.Mesh.from_file(stl_path)
-    volume_mm3, _, _ = m.get_mass_properties()
-    
-    vol_cm3 = float(volume_mm3 / 1000.0)
-    dims = (
-        float(m.x.max() - m.x.min()),
-        float(m.y.max() - m.y.min()),
-        float(m.z.max() - m.z.min())
-    )
-    return vol_cm3, dims
+    try:
+        _binarize_image(image_path, p["pnm"])
+        _vectorize_to_svg(p["pnm"], p["svg"])
+        _generate_filled_svg(p["svg"], p["filled"])
+        _generate_openscad_code(p["svg"], p["filled"], p["scad"], wh, wt, hh, ht)
+        
+        # Renderizado
+        subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True, timeout=300)
+        
+        # Datos finales
+        m = mesh.Mesh.from_file(p["stl"])
+        vol, _, _ = m.get_mass_properties()
+        dims = [m.x.max()-m.x.min(), m.y.max()-m.y.min(), m.z.max()-m.z.min()]
+        
+        final_stl = str(STL_DIR / f"{output_name}.stl")
+        shutil.copy2(p["stl"], final_stl)
+        
+        # Generar preview
+        subprocess.run(["openscad", "-o", p["preview"], "--imgsize=800,800", p["scad"]], timeout=120)
 
-
-def _generate_preview(scad_path: str, preview_path: str) -> None:
-    cmd = [
-        "openscad", "-o", preview_path, 
-        "--imgsize=800,800", 
-        "--colorscheme=Starlight",
-        scad_path
-    ]
-    subprocess.run(cmd, capture_output=True, timeout=120)
-
+        return {
+            "exito": True, "mensaje": "OK",
+            "stl_path": final_stl, "preview_path": p["preview"],
+            "volumen_cm3": round(vol/1000.0, 4),
+            "dimensiones": [round(d, 2) for d in dims],
+            "parametros": {"wh": wh, "wt": wt, "hh": hh, "ht": ht}
+        }
+    except Exception as e:
+        return {"exito": False, "mensaje": str(e), "volumen_cm3": 0, "dimensiones": [0,0,0]}
 
 def calculate_price(volumen_cm3: float) -> dict:
-    from app.config import (
-        COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, 
-        CURRENCY, CURRENCY_SYMBOL
-    )
-    
-    vol_cm3 = float(volumen_cm3)
-    costo_materiales = vol_cm3 * COSTO_FILAMENTO_POR_CM3
-    precio_final = (costo_materiales + COSTO_BASE) * MARGEN
-
+    from app.config import COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, CURRENCY, CURRENCY_SYMBOL
+    costo_mat = volumen_cm3 * COSTO_FILAMENTO_POR_CM3
+    total = (costo_mat + COSTO_BASE) * MARGEN
     return {
-        "volumen_cm3": round(vol_cm3, 4),
-        "costo_materiales": round(float(costo_materiales), 2),
-        "costo_base": float(COSTO_BASE),
-        "margen": float(MARGEN),
-        "precio_final": round(float(precio_final), 2),
-        "moneda": CURRENCY,
-        "simbolo": CURRENCY_SYMBOL,
+        "precio_final": round(total, 2), "volumen_cm3": round(volumen_cm3, 4),
+        "costo_materiales": round(costo_mat, 2), "costo_base": COSTO_BASE,
+        "margen": MARGEN, "moneda": CURRENCY, "simbolo": CURRENCY_SYMBOL
     }
