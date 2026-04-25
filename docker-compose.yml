@@ -1,0 +1,54 @@
+# ============================================================
+# CookieCutterPrintService - Docker Compose
+# Despliegue simplificado en un solo contenedor.
+# Compatible con EasyPanel (usa docker-compose internally).
+# ============================================================
+
+version: "3.8"
+
+services:
+  cookiecutter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cookiecutter-print-service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Servidor
+      - HOST=0.0.0.0
+      - PORT=8000
+      # Base de datos (persistida en volumen)
+      - DATABASE_PATH=./db/orders.db
+      # Moneda y precios
+      - CURRENCY=ARS
+      - CURRENCY_SYMBOL=$
+      - COSTO_FILAMENTO_POR_CM3=0.5
+      - COSTO_BASE=300.0
+      - MARGEN=1.4
+      # Parametros del cortante
+      - WALL_HEIGHT=15
+      - WALL_THICKNESS=1.2
+      - HANDLE_HEIGHT=8
+      - HANDLE_THICKNESS=3
+      # SMTP (opcional - dejar vacio para desactivar)
+      - SMTP_HOST=
+      - SMTP_PORT=587
+      - SMTP_USER=
+      - SMTP_PASS=
+      - SMTP_FROM=noreply@cookiecutter.local
+      - SMTP_TO=admin@cookiecutter.local
+      # URL publica (cambiar en produccion)
+      - PUBLIC_URL=http://localhost:8000
+    volumes:
+      # Persistir base de datos entre reinicios
+      - ./db:/app/db
+      # Persistir archivos subidos y STL generados
+      - ./uploads:/app/frontend/static/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
