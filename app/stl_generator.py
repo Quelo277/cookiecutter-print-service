@@ -189,6 +189,7 @@ translate([100, 0, 0]) {{
 
 def _render_stl(scad_path: str, stl_path: str) -> None:
     cmd = ["openscad", "-o", stl_path, scad_path]
+    # Asegurate de que el timeout sea generoso (ej: 300 segundos)
     subprocess.run(cmd, check=True, capture_output=True, timeout=300)
 
 
