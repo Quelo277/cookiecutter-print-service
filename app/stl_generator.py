@@ -133,64 +133,55 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
     """
-    Genera un set de dos piezas: 
-    1. Cortante exterior con mango.
-    2. Sello interior (estampador) con soporte.
+    Versión optimizada para evitar Timeouts.
+    Genera cortante y sello con geometría simplificada.
     """
     scad_code = f"""
-// Parametros de Gema Makers
+// Configuración de resolución (Menos es más rápido)
+$fn = 16; 
 wall_height = {wh};
 wall_thickness = {wt};
 handle_height = {hh};
 handle_thickness = {ht};
-tolerancia = 0.5; // Espacio para que el sello deslice dentro
+tolerancia = 0.6; 
 
-module pieza_exterior() {{
-    union() {{
-        // Pared de corte
-        linear_extrude(height = wall_height)
-            difference() {{
-                offset(r = wall_thickness / 2) 
-                    import("{svg_path}", center = true, dpi = 96);
-                offset(r = -wall_thickness / 2) 
-                    import("{svg_path}", center = true, dpi = 96);
-            }}
-        // Mango exterior
-        linear_extrude(height = handle_height)
-            difference() {{
-                offset(r = handle_thickness) 
-                    import("{svg_path}", center = true, dpi = 96);
-                offset(r = -wall_thickness / 2) 
-                    import("{svg_path}", center = true, dpi = 96);
-            }}
-    }}
+module silueta() {{
+    import("{svg_path}", center = true, dpi = 96);
 }}
 
-module pieza_interior() {{
-    // Desplazamos el sello a la derecha para que se impriman por separado
-    // o podes comentarlo si queres generar dos STLs distintos
-    translate([100, 0, 0]) {{ 
-        union() {{
-            // Base del estampado (la que toca la masa)
-            linear_extrude(height = 3) // Espesor de la placa del sello
-                offset(r = -wall_thickness / 2 - tolerancia) 
-                    import("{svg_path}", center = true, dpi = 96);
-            
-            // Detalles internos (ojos, nariz, etc.) 
-            // Suben un poco mas para marcar bien
-            linear_extrude(height = 5) 
-                offset(r = -wall_thickness / 2 - tolerancia)
-                    import("{svg_path}", center = true, dpi = 96);
-
-            // Mango del sello para agarrarlo
-            translate([0,0,3])
-            cylinder(h = wall_height - 3, r1 = 10, r2 = 8, $fn=32);
+// 1. PIEZA EXTERIOR (CORTANTE)
+union() {{
+    // Pared de corte: Usamos un offset simple hacia afuera
+    linear_extrude(height = wall_height)
+        difference() {{
+            offset(r = wall_thickness) silueta();
+            silueta();
         }}
-    }}
+    // Mango: Base de apoyo
+    linear_extrude(height = handle_height)
+        difference() {{
+            offset(r = handle_thickness) silueta();
+            silueta();
+        }}
 }}
 
-pieza_exterior();
-pieza_interior();
+// 2. PIEZA INTERIOR (SELLO)
+// Separada para que no colisionen en la cama de impresión
+translate([100, 0, 0]) {{
+    union() {{
+        // Base del sello (reducida por tolerancia)
+        linear_extrude(height = 3)
+            offset(r = -tolerancia) silueta();
+        
+        // Detalles internos
+        linear_extrude(height = 5)
+            offset(r = -tolerancia - 0.2) silueta();
+
+        // Agarre (Cilindro simple para no estresar el render)
+        translate([0, 0, 3])
+            cylinder(h = wall_height - 3, r1 = 8, r2 = 6);
+    }}
+}}
 """
     with open(scad_path, "w") as f:
         f.write(scad_code)
