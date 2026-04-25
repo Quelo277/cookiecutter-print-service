@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# 1. Instalamos todas las dependencias
+# 1. Instalamos dependencias incluyendo 'libgs-dev' y herramientas de compilación
 RUN apt-get update && apt-get install -y \
     pstoedit \
     ghostscript \
@@ -9,28 +9,24 @@ RUN apt-get update && apt-get install -y \
     potrace \
     libmagickwand-dev \
     libgl1-mesa-dev \
-    # Esta librería ayuda a pstoedit con los formatos vectoriales
-    libploticus0 \ 
     && rm -rf /var/lib/apt/lists/*
 
-# 2. ELIMINAR RESTRICCIONES Y FORZAR PERMISOS
-# Eliminamos la política de ImageMagick
-RUN rm /etc/ImageMagick-6/policy.xml || true
+# 2. ATAQUE DIRECTO A LA SEGURIDAD DE GHOSTSCRIPT
+# Sobreescribimos la política de seguridad para que sea totalmente abierta
+RUN echo '<?xml version="1.0" encoding="UTF-8"?><policymap><policy domain="coder" rights="read|write" pattern="PS" /><policy domain="coder" rights="read|write" pattern="EPS" /><policy domain="coder" rights="read|write" pattern="PDF" /><policy domain="coder" rights="read|write" pattern="XPS" /></policymap>' > /etc/ImageMagick-6/policy.xml
 
-# Modificamos la configuración global de Ghostscript para que acepte todo
-RUN sed -i 's/read-only/read-write/g' /usr/share/ghostscript/*/Resource/Init/gs_init.ps || true
+# 3. EL "TRUCO" PARA PSTOEDIT:
+# Forzamos a que ignore el modo SAFER creando un alias o variable
+ENV GS_OPTIONS="-dNOSAFER -dDEBUG"
 
 WORKDIR /app
-
-# 3. Variables de entorno para saltar la seguridad de Ghostscript
-ENV GS_OPTIONS="-dNOSAFER -dALLOWPSTRANSPARENCY"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 4. Carpetas con permisos totales (777)
+# 4. Crear carpetas y dar permisos exagerados para evitar bloqueos de /tmp
 RUN mkdir -p /app/data /app/static/uploads/previews /app/static/uploads/stl /app/static/uploads/input && \
     chmod -R 777 /app/static/uploads /app/data /tmp
 
