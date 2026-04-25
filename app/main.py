@@ -15,9 +15,16 @@ templates = Jinja2Templates(directory="frontend/templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {
-        "request": request, "currency": CURRENCY, "currency_symbol": CURRENCY_SYMBOL, "public_url": PUBLIC_URL
-    })
+    # En versiones modernas de Starlette/FastAPI, el contexto es el segundo argumento
+    return templates.TemplateResponse(
+        name="index.html", 
+        context={
+            "request": request, 
+            "currency": CURRENCY, 
+            "currency_symbol": CURRENCY_SYMBOL, 
+            "public_url": PUBLIC_URL
+        }
+    )
 
 @app.post("/api/upload")
 async def upload_image(
