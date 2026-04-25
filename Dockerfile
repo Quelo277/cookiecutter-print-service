@@ -1,67 +1,25 @@
-# ============================================================
-# CookieCutterPrintService - Dockerfile
-# Contenedor unico con: Ubuntu, OpenSCAD, ImageMagick, Potrace,
-# Python 3.11+ y la aplicacion FastAPI.
-# ============================================================
+# Usamos Python 3.11
+FROM python:3.11-slim
 
-FROM ubuntu:22.04
-
-# Evitar prompts interactivos
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# --- 1. Dependencias de sistema ---
+# Instalamos dependencias del sistema para procesamiento de imágenes y 3D
 RUN apt-get update && apt-get install -y \
-    # Python 3.11 y pip
-    python3.11 \
-    python3.11-venv \
-    python3-pip \
-    # ImageMagick
-    imagemagick \
-    # Potrace (vectorizacion)
-    potrace \
-    # pstoedit (EPS -> DXF)
     pstoedit \
-    # OpenSCAD
+    ghostscript \
     openscad \
-    # Herramientas utiles
-    curl \
-    wget \
-    git \
-    ca-certificates \
-    # Limpieza
+    libgl1-mesa-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Verificar instalaciones
-RUN echo "=== Versiones instaladas ===" \
-    && python3.11 --version \
-    && convert --version | head -1 \
-    && potrace --version | head -1 \
-    && pstoedit -help | head -1 \
-    && openscad --version | head -1
+# Configuración de seguridad de Ghostscript (necesaria para pstoedit)
+RUN sed -i 's/policy domain="coder" rights="none" pattern="PDF"/policy domain="coder" rights="read|write" pattern="PDF"/' /etc/ImageMagick-6/policy.xml || true
 
-# --- 2. Directorio de trabajo ---
 WORKDIR /app
 
-# --- 3. Copiar dependencias Python ---
+# Copiamos y instalamos dependencias de Python
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Instalar dependencias Python
-#RUN pip3 install --no-cache-dir -r requirements.txt
-RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
-
-# --- 4. Copiar codigo fuente ---
+# Copiamos el resto del código
 COPY . .
 
-# Crear directorios necesarios
-RUN mkdir -p db frontend/static/uploads/stl frontend/static/uploads/previews
-
-# --- 5. Puerto y healthcheck ---
-EXPOSE 8000
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-# --- 6. Comando de inicio ---
-CMD ["python3.11", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Comando para iniciar la app
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
