@@ -15,11 +15,12 @@ templates = Jinja2Templates(directory="frontend/templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    # En versiones modernas de Starlette/FastAPI, el contexto es el segundo argumento
+    # LA SOLUCIÓN: Pasamos 'request' como primer argumento del contexto 
+    # o directamente a la función según la versión de Starlette.
     return templates.TemplateResponse(
+        request=request, 
         name="index.html", 
         context={
-            "request": request, 
             "currency": CURRENCY, 
             "currency_symbol": CURRENCY_SYMBOL, 
             "public_url": PUBLIC_URL
@@ -31,8 +32,6 @@ async def upload_image(
     file: UploadFile = File(...),
     wall_height: Optional[float] = Form(None),
     wall_thickness: Optional[float] = Form(None),
-    handle_height: Optional[float] = Form(None),
-    handle_thickness: Optional[float] = Form(None),
 ):
     job_id = str(uuid.uuid4())[:12]
     ext = Path(file.filename).suffix.lower()
