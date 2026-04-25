@@ -1,30 +1,32 @@
-# 1. Usamos una base de Python 3.11
+# 1. Usamos Python 3.11
 FROM python:3.11-slim
 
-# 2. Instalamos las herramientas de "taller" (OpenSCAD, Ghostscript y pstoedit)
-# Estas son las que convierten tu imagen en un objeto 3D
+# 2. Instalamos herramientas de imagen y 3D
+# Añadimos imagemagick para solucionar el error de 'convert'
 RUN apt-get update && apt-get install -y \
     pstoedit \
     ghostscript \
     openscad \
+    imagemagick \
+    libmagickwand-dev \
     libgl1-mesa-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Permisos especiales para Ghostscript (necesario para evitar el error que veías)
+# 3. CRÍTICO: Permitir que ImageMagick y Ghostscript procesen archivos
+# Por defecto vienen bloqueados en Linux por seguridad
 RUN sed -i 's/rights="none" pattern="PS"/rights="read|write" pattern="PS"/' /etc/ImageMagick-6/policy.xml || true
+RUN sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' /etc/ImageMagick-6/policy.xml || true
+RUN sed -i 's/rights="none" pattern="EPS"/rights="read|write" pattern="EPS"/' /etc/ImageMagick-6/policy.xml || true
 
-# 4. Configuración del directorio de trabajo
 WORKDIR /app
 
-# 5. Instalamos las librerías de Python
+# 4. Dependencias de Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. Copiamos todo tu código al contenedor
+# 5. Código y carpetas
 COPY . .
-
-# 7. Creamos las carpetas necesarias para que no den error de "permiso denegado"
 RUN mkdir -p /app/data /app/static/uploads/previews /app/static/uploads/stl /app/static/uploads/input
 
-# 8. Comando de inicio
+# 6. Comando de inicio
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
