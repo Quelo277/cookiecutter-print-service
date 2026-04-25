@@ -27,8 +27,7 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
     subprocess.run(["potrace", "-s", "-o", output_svg, bnw_pnm], check=True)
 
 def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
-    # Ajuste de acciones para compatibilidad con Inkscape 1.2+ en Linux
-    # Intentamos simplificar el proceso para que no falle si falta una acción específica
+    # Usamos acciones compatibles con Inkscape 1.2/1.3+ para rellenar la silueta
     cmd = [
         "inkscape", input_svg, 
         "--batch-process",
@@ -48,7 +47,6 @@ def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
         "filled": str(work_dir / "filled.svg"),
         "scad": str(work_dir / "model.scad"),
         "stl": str(work_dir / "model.stl"),
-        "preview": str(PREVIEW_DIR / f"{output_name}.png")
     }
 
     try:
@@ -57,35 +55,38 @@ def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
         _generate_filled_svg(p["svg"], p["filled"])
 
         scad_code = f"""
-$fn = 16;
+$fn = 24;
 module original() {{ import("{p['svg']}", center=true, dpi=96); }}
 module rellena() {{ import("{p['filled']}", center=true, dpi=96); }}
 
-// Cortante (basado en silueta)
+// Cortante (Pared exterior)
 linear_extrude(height={wh}) difference() {{
     offset(r={wt}) rellena();
     rellena();
 }}
-// Sello (detalles + base fina)
-translate([120, 0, 0]) {{
-    linear_extrude(height=2) offset(r=-0.6) rellena();
-    linear_extrude(height=5) offset(r=-0.6) original();
-}}
+
+// Base/Sello (Detalles interiores)
+linear_extrude(height=2) offset(r=0.2) rellena();
+linear_extrude(height={wh * 0.7}) original();
 """
         with open(p["scad"], "w") as f: f.write(scad_code)
+        
+        # Generar STL con OpenSCAD
         subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True)
         
+        # Cargar malla para calcular propiedades
         m = mesh.Mesh.from_file(p["stl"])
         volume_mm3, _, _ = m.get_mass_properties()
         
-        # FIX CRÍTICO: Convertir de numpy.float32 a float estándar de Python
+        # IMPORTANTE: Conversión de tipos NumPy a Python nativo para el JSON
         dims = [
             float(m.x.max() - m.x.min()), 
             float(m.y.max() - m.y.min()), 
             float(m.z.max() - m.z.min())
         ]
-        volumen_final = float(volume_mm3) / 1000.0
+        volumen_final = float(volume_mm3) / 1000.0 # Pasar de mm3 a cm3
 
+        # Mover resultado final a la carpeta pública
         shutil.copy2(p["stl"], str(STL_DIR / f"{output_name}.stl"))
         
         return {
@@ -95,15 +96,23 @@ translate([120, 0, 0]) {{
             "mensaje": "OK"
         }
     except Exception as e:
-        return {"exito": False, "mensaje": str(e), "volumen_cm3": 0.0, "dimensiones": [0.0, 0.0, 0.0]}
+        return {
+            "exito": False, 
+            "mensaje": str(e), 
+            "volumen_cm3": 0.0, 
+            "dimensiones": [0, 0, 0]
+        }
 
 def calculate_price(volumen_cm3: float) -> dict:
-    # Asegurar que volumen_cm3 sea float estándar
+    # Aseguramos que sea float puro
     v = float(volumen_cm3)
     costo_mat = v * COSTO_FILAMENTO_POR_CM3
     total = (costo_mat + COSTO_BASE) * MARGEN
+    
+    # Esta estructura debe coincidir con lo que app.js espera
     return {
         "precio_final": float(round(total, 2)),
+        "costo_materiales": float(round(costo_mat, 2)),
         "volumen_cm3": float(round(v, 4)),
         "moneda": CURRENCY,
         "simbolo": CURRENCY_SYMBOL
