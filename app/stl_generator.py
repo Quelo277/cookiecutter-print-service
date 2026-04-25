@@ -132,18 +132,54 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
+    """
+    Genera el archivo OpenSCAD (.scad) para un CORTANTE (no un sello).
+    Toma el SVG y extruye solo el borde para formar la pared cortante.
+    """
+    # Explicación de la lógica:
+    # 1. Importamos el SVG.
+    # 2. Hacemos un offset positivo ( wt/2 ) y uno negativo ( -wt/2 ) de la misma forma.
+    # 3. Restamos el más chico al más grande ( difference() ).
+    # 4. El resultado es un "anillo" o borde perfecto de grosor 'wt'.
+    # 5. Extruimos ese borde hacia arriba 'wh'.
+    
     scad_code = f"""
+// CookieCutterPrintService - Gema Makers
+// Cortante generado automáticamente
+
 wall_height = {wh};
 wall_thickness = {wt};
 handle_height = {hh};
 handle_thickness = {ht};
 
-linear_extrude(height = wall_height, convexity = 10)
-    import("{svg_path}", center = true, dpi = 96);
+// El DXF/SVG importado define la silueta.
+// Usamos offset() para generar el grosor de la pared.
 
-linear_extrude(height = handle_height)
-    offset(r = handle_thickness)
-        import("{svg_path}", center = true, dpi = 96);
+union() {{
+    // PARED CORTANTE (Extrusión de borde)
+    linear_extrude(height = wall_height, convexity = 10) {{
+        difference() {{
+            // Borde exterior
+            offset(r = wall_thickness / 2)
+                import("{svg_path}", center = true, dpi = 96);
+            // Borde interior (lo que vaciamos)
+            offset(r = -wall_thickness / 2)
+                import("{svg_path}", center = true, dpi = 96);
+        }}
+    }}
+
+    // BASE / MANGO DE APOYO
+    linear_extrude(height = handle_height) {{
+        difference() {{
+            // Base ancha
+            offset(r = handle_thickness)
+                import("{svg_path}", center = true, dpi = 96);
+            // Vaciado interior (para que no sea un bloque sólido)
+            offset(r = -wall_thickness / 2)
+                import("{svg_path}", center = true, dpi = 96);
+        }}
+    }}
+}}
 """
     with open(scad_path, "w") as f:
         f.write(scad_code)
