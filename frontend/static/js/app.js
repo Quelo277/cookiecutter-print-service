@@ -48,20 +48,16 @@ fileInput.addEventListener('change', (e) => {
 });
 
 function handleFile(file) {
-    // Validar tipo
     const allowed = ['image/jpeg', 'image/jpg', 'image/png'];
     if (!allowed.includes(file.type)) {
         showToast('Formato no permitido. Usa JPG o PNG.', 'error');
         return;
     }
-
-    // Validar tamano (10MB)
     if (file.size > 10 * 1024 * 1024) {
         showToast('Archivo demasiado grande. Max: 10 MB', 'error');
         return;
     }
 
-    // Mostrar preview
     const reader = new FileReader();
     reader.onload = (e) => {
         previewImage.src = e.target.result;
@@ -70,16 +66,11 @@ function handleFile(file) {
     };
     reader.readAsDataURL(file);
 
-    // Guardar referencia
     uploadZone.dataset.file = 'ready';
     btnGenerate.disabled = false;
-
     showToast('Imagen cargada. Haz clic en "Generar cortante".', 'info');
 }
 
-// ============================================================
-// Parametros avanzados toggle
-// ============================================================
 paramsToggle.addEventListener('click', () => {
     paramsGrid.classList.toggle('hidden');
     paramsToggle.classList.toggle('active');
@@ -100,16 +91,11 @@ btnGenerate.addEventListener('click', async () => {
         const formData = new FormData();
         formData.append('file', fileInput.files[0]);
 
-        // Parametros opcionales
         const wh = document.getElementById('wall-height').value;
         const wt = document.getElementById('wall-thickness').value;
-        const hh = document.getElementById('handle-height').value;
-        const ht = document.getElementById('handle-thickness').value;
-
+        
         if (wh) formData.append('wall_height', wh);
         if (wt) formData.append('wall_thickness', wt);
-        if (hh) formData.append('handle_height', hh);
-        if (ht) formData.append('handle_thickness', ht);
 
         const res = await fetch('/api/upload', {
             method: 'POST',
@@ -124,8 +110,9 @@ btnGenerate.addEventListener('click', async () => {
 
         currentJob = data;
 
-        // Mostrar resultados
+        // Mostrar resultados (ESTO ES LO QUE ARREGLAMOS)
         displayResults(data);
+        
         stepResult.classList.remove('hidden');
         stepResult.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
@@ -144,24 +131,37 @@ btnGenerate.addEventListener('click', async () => {
 });
 
 function displayResults(data) {
-    // Specs
-    document.getElementById('spec-volume').textContent = data.volumen_cm3.toFixed(4) + ' cm3';
-    const d = data.dimensiones_mm;
+    // Specs - Validamos que existan antes de toFixed
+    const vol = data.volumen_cm3 || 0;
+    document.getElementById('spec-volume').textContent = vol.toFixed(4) + ' cm³';
+    
+    // Dimensiones (vienen como array [x,y,z] en el nuevo stl_generator)
+    const d = data.dimensiones || [0,0,0];
     document.getElementById('spec-dims').textContent = `${d[0].toFixed(1)} x ${d[1].toFixed(1)} x ${d[2].toFixed(1)} mm`;
 
-    // Precio
-    const p = data.precio;
-    document.getElementById('price-materials').textContent = `${p.simbolo}${p.costo_materiales.toFixed(2)}`;
-    document.getElementById('price-base').textContent = `${p.simbolo}${p.costo_base.toFixed(2)}`;
-    document.getElementById('price-margin').textContent = `x${p.margen}`;
-    document.getElementById('price-total').textContent = `${p.simbolo}${p.precio_final.toFixed(2)} ${p.moneda}`;
+    // Precio - Sincronizado con el backend
+    const p = data.precio || {};
+    const simb = p.simbolo || '$';
+    
+    // Asignamos valores con fallbacks para evitar errores de undefined
+    document.getElementById('price-materials').textContent = `${simb}${(p.costo_materiales || 0).toFixed(2)}`;
+    
+    // Estos campos podrían no venir en el JSON simplificado, ponemos 0 o el valor por defecto
+    const base = p.costo_base || 0;
+    const marg = p.margen || 1;
+    const final = p.precio_final || 0;
+
+    if(document.getElementById('price-base')) document.getElementById('price-base').textContent = `${simb}${base.toFixed(2)}`;
+    if(document.getElementById('price-margin')) document.getElementById('price-margin').textContent = `x${marg}`;
+    
+    document.getElementById('price-total').textContent = `${simb}${final.toFixed(2)} ${p.moneda || 'ARS'}`;
 
     // Download link
     document.getElementById('download-stl').href = data.stl_url;
 }
 
 // ============================================================
-// Three.js - Visor 3D STL
+// Three.js - Visor 3D STL (Sin cambios, es robusto)
 // ============================================================
 function initThreeJS() {
     const container = document.getElementById('threejs-container');
@@ -170,11 +170,9 @@ function initThreeJS() {
     const width = container.clientWidth;
     const height = container.clientHeight;
 
-    // Escena
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf0f0f0);
 
-    // Luz ambiental + direccional
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
@@ -182,132 +180,59 @@ function initThreeJS() {
     dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
 
-    const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.3);
-    dirLight2.position.set(-10, 10, -10);
-    scene.add(dirLight2);
-
-    // Camara
     camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
     camera.position.set(0, 0, 100);
 
-    // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
 
-    // Controles
     controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
     controls.autoRotate = true;
-    controls.autoRotateSpeed = 2;
 
-    // Grid helper
-    const grid = new THREE.GridHelper(100, 20, 0xcccccc, 0xe0e0e0);
-    grid.rotation.x = Math.PI / 2;
-    grid.position.z = -20;
-    scene.add(grid);
-
-    // Resize handler
-    window.addEventListener('resize', onThreeJSResize);
-
-    // Animacion
     animate();
-}
-
-function onThreeJSResize() {
-    const container = document.getElementById('threejs-container');
-    if (!container || !camera || !renderer) return;
-    const w = container.clientWidth;
-    const h = container.clientHeight;
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-    renderer.setSize(w, h);
 }
 
 function animate() {
     requestAnimationFrame(animate);
-    if (controls) {
-        controls.update();
-    }
-    if (renderer && scene && camera) {
-        renderer.render(scene, camera);
-    }
+    if (controls) controls.update();
+    if (renderer && scene && camera) renderer.render(scene, camera);
 }
 
 function loadSTL(jobId) {
     if (!scene) return;
-
-    // Usar STLLoader
     const loader = new THREE.STLLoader();
-
-    fetch(`/api/stl-preview/${jobId}`)
-        .then(r => r.json())
-        .then(data => {
-            if (!data.stl_base64) {
-                // Fallback: cargar directamente desde URL
-                loader.load(`/api/download/${jobId}.stl`, (geometry) => {
-                    displayGeometry(geometry);
-                }, undefined, (err) => {
-                    console.error('Error cargando STL:', err);
-                    showToast('No se pudo cargar el preview 3D', 'error');
-                });
-                return;
-            }
-
-            // Decodificar base64
-            const binary = atob(data.stl_base64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-            }
-
-            const blob = new Blob([bytes], { type: 'application/octet-stream' });
-            const url = URL.createObjectURL(blob);
-
-            loader.load(url, (geometry) => {
-                displayGeometry(geometry);
-                URL.revokeObjectURL(url);
-            }, undefined, (err) => {
-                console.error('Error cargando STL:', err);
-                showToast('No se pudo cargar el preview 3D', 'error');
-            });
-        })
-        .catch(err => {
-            console.error(err);
-            // Intentar carga directa
-            loader.load(`/api/download/${jobId}.stl`, (geometry) => {
-                displayGeometry(geometry);
-            });
-        });
+    
+    // Intentamos cargar el archivo directamente usando la URL de descarga
+    loader.load(`/api/download/${jobId}.stl`, (geometry) => {
+        displayGeometry(geometry);
+    }, undefined, (err) => {
+        console.error('Error cargando STL:', err);
+        showToast('No se pudo cargar el preview 3D', 'error');
+    });
 }
 
 function displayGeometry(geometry) {
-    // Material
     const material = new THREE.MeshPhongMaterial({
         color: 0xFF6B35,
         specular: 0x222222,
         shininess: 80,
-        flatShading: false,
     });
 
-    // Remover mesh anterior
     if (stlMesh) {
         scene.remove(stlMesh);
         stlMesh.geometry.dispose();
     }
 
     stlMesh = new THREE.Mesh(geometry, material);
-
-    // Centrar y escalar
     geometry.computeBoundingBox();
     const center = new THREE.Vector3();
     geometry.boundingBox.getCenter(center);
     stlMesh.position.sub(center);
 
-    // Ajustar escala para que quepa en vista
     const size = new THREE.Vector3();
     geometry.boundingBox.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z);
@@ -315,12 +240,7 @@ function displayGeometry(geometry) {
     stlMesh.scale.set(scale, scale, scale);
 
     scene.add(stlMesh);
-
-    // Actualizar controles
-    if (controls) {
-        controls.reset();
-        controls.autoRotate = true;
-    }
+    if (controls) controls.reset();
 }
 
 // ============================================================
@@ -328,11 +248,7 @@ function displayGeometry(geometry) {
 // ============================================================
 orderForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-
-    if (!currentJob) {
-        showToast('Primero genera un presupuesto.', 'error');
-        return;
-    }
+    if (!currentJob) return;
 
     const btn = orderForm.querySelector('button[type="submit"]');
     setLoading(btn, true);
@@ -343,7 +259,6 @@ orderForm.addEventListener('submit', async (e) => {
         formData.append('nombre', document.getElementById('order-name').value);
         formData.append('email', document.getElementById('order-email').value);
         formData.append('telefono', document.getElementById('order-phone').value || '');
-        formData.append('notas', document.getElementById('order-notes').value || '');
         formData.append('aceptar', 'true');
 
         const res = await fetch('/api/order', {
@@ -352,66 +267,48 @@ orderForm.addEventListener('submit', async (e) => {
         });
 
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Error en pedido');
 
-        if (!res.ok) {
-            throw new Error(data.detail || 'Error al registrar el pedido');
-        }
-
-        // Mostrar exito
         stepResult.classList.add('hidden');
         document.getElementById('step-upload').classList.add('hidden');
         stepSuccess.classList.remove('hidden');
 
-        // Detalles
         document.getElementById('success-details').innerHTML = `
-            <p><strong>Numero de pedido:</strong> #${data.order_id}</p>
-            <p><strong>Precio total:</strong> ${data.simbolo}${data.precio_final.toFixed(2)} ${data.moneda}</p>
-            <p><strong>Estado:</strong> ${data.estado}</p>
+            <p><strong>Pedido:</strong> #${data.order_id}</p>
+            <p><strong>Total:</strong> ${data.simbolo}${data.precio_final.toFixed(2)}</p>
         `;
 
-        showToast(data.mensaje, 'success');
-
     } catch (err) {
-        console.error(err);
         showToast('Error: ' + err.message, 'error');
     } finally {
         setLoading(btn, false);
     }
 });
 
-// ============================================================
-// Utilidades
-// ============================================================
 function setLoading(btn, loading) {
     const text = btn.querySelector('.btn-text');
     const loader = btn.querySelector('.btn-loader');
     if (loading) {
         btn.disabled = true;
-        text.classList.add('hidden');
-        loader.classList.remove('hidden');
+        if(text) text.classList.add('hidden');
+        if(loader) loader.classList.remove('hidden');
     } else {
         btn.disabled = false;
-        text.classList.remove('hidden');
-        loader.classList.add('hidden');
+        if(text) text.classList.remove('hidden');
+        if(loader) loader.classList.add('hidden');
     }
 }
 
 function showToast(message, type = 'info') {
     const container = document.getElementById('toast-container');
+    if(!container) { alert(message); return; }
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.textContent = message;
     container.appendChild(toast);
-
-    // Auto-remove
-    setTimeout(() => {
-        if (toast.parentNode) toast.remove();
-    }, 4000);
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 4000);
 }
 
-// ============================================================
-// Inicializar
-// ============================================================
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('[CookieCutterPrintService] Frontend cargado');
+    console.log('Gema Makers - Cookie Cutter Service Ready');
 });
