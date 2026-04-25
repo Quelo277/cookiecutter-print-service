@@ -133,8 +133,8 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
     """
-    Generador optimizado estilo Papooch.
-    Separa el corte perimetral de los detalles internos.
+    Generador de Cortante y Sello - Versión Final 'Gema Makers' 
+    Basado en lógica de encapsulado de contornos.
     """
     scad_code = f"""
 $fn = 16;
@@ -144,50 +144,51 @@ handle_height = {hh};
 handle_thickness = {ht};
 tolerancia = 0.6;
 
-module imagen_base() {{
+module original_svg() {{
     import("{svg_path}", center = true, dpi = 96);
 }}
 
-// PIEZA 1: EL CORTANTE EXTERIOR (Solo el borde)
-module cortante_exterior() {{
+// --- PIEZA 1: CORTANTE EXTERIOR ---
+module pieza_cortante() {{
     union() {{
-        // Pared de corte principal
+        // La pared afilada que corta (crece hacia afuera del dibujo)
         linear_extrude(height = wall_height)
             difference() {{
-                offset(r = wall_thickness) imagen_base();
-                offset(r = 0) imagen_base();
+                offset(r = wall_thickness) original_svg();
+                original_svg();
             }}
-        
-        // Mango (Base de apoyo)
+        // El mango de agarre (crece más hacia afuera)
         linear_extrude(height = handle_height)
             difference() {{
-                offset(r = handle_thickness) imagen_base();
-                offset(r = 0) imagen_base();
+                offset(r = handle_thickness) original_svg();
+                original_svg();
             }}
     }}
 }}
 
-// PIEZA 2: EL SELLO (Estampador con detalles)
-module sello_interior() {{
-    translate([100, 0, 0]) {{ // Separación para imprimir
+// --- PIEZA 2: SELLO ESTAMPADOR (Independiente) ---
+module pieza_sello() {{
+    translate([100, 0, 0]) {{
         union() {{
-            // Placa base del sello (Une todos los detalles)
+            // PLACA BASE: Usamos offset negativo para que entre perfecto
             linear_extrude(height = 2)
-                offset(r = -tolerancia) imagen_base();
+                offset(r = -tolerancia) original_svg();
             
-            // Los detalles que sobresalen para marcar la masa
+            // DETALLES: Los resaltamos para que marquen la masa
+            // Se usa un offset un poco mayor para asegurar que no se traben
             linear_extrude(height = 4)
-                offset(r = -tolerancia - 0.3) imagen_base();
+                offset(r = -tolerancia - 0.2) original_svg();
             
-            // Agarre tipo "botón" central
+            // SOPORTE TRASERO (Cilindro para apretar con el dedo)
             translate([0, 0, 2])
                 cylinder(h = wall_height - 2, r1 = 12, r2 = 8);
         }}
     }}
 }}
 
-cortante_exterior();
-sello_interior();
+// Ejecutar generación
+pieza_cortante();
+pieza_sello();
 """
     with open(scad_path, "w") as f:
         f.write(scad_code)
