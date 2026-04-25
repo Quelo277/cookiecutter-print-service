@@ -132,7 +132,10 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
-    """Lógica estilo Papooch para Cortante + Sello separado."""
+    """
+    Versión Gema Makers v3: Lógica de relleno de contornos.
+    Asegura que el cortante sea solo el borde exterior y el sello una silueta sólida.
+    """
     scad_code = f"""
 $fn = 16;
 wall_height = {wh};
@@ -141,38 +144,52 @@ handle_height = {hh};
 handle_thickness = {ht};
 tolerancia = 0.6;
 
-module original_svg() {{
+module silueta_rellena() {{
+    // fill() elimina los huecos internos (ojos, boca) 
+    // para obtener solo el contorno exterior limpio.
+    fill() import("{svg_path}", center = true, dpi = 96);
+}}
+
+module dibujo_original() {{
     import("{svg_path}", center = true, dpi = 96);
 }}
 
-// PIEZA 1: CORTANTE EXTERIOR
+// --- PIEZA 1: CORTANTE EXTERIOR ---
+// Solo sigue el borde externo del dibujo
 module pieza_cortante() {{
     union() {{
+        // Pared de corte
         linear_extrude(height = wall_height)
             difference() {{
-                offset(r = wall_thickness) original_svg();
-                original_svg();
+                offset(r = wall_thickness) silueta_rellena();
+                silueta_rellena();
             }}
+        // Mango/Base
         linear_extrude(height = handle_height)
             difference() {{
-                offset(r = handle_thickness) original_svg();
-                original_svg();
+                offset(r = handle_thickness) silueta_rellena();
+                silueta_rellena();
             }}
     }}
 }}
 
-// PIEZA 2: SELLO ESTAMPADOR
+// --- PIEZA 2: SELLO ESTAMPADOR ---
+// Genera una placa con la forma del dibujo y los detalles encima
 module pieza_sello() {{
     translate([100, 0, 0]) {{
         union() {{
+            // 1. Placa base (la forma del personaje, un poco más chica)
             linear_extrude(height = 2)
-                offset(r = -tolerancia) original_svg();
+                offset(r = -tolerancia) silueta_rellena();
             
+            // 2. Detalles internos (los que marcan la masa)
+            // Se proyectan desde la base
             linear_extrude(height = 4)
-                offset(r = -tolerancia - 0.2) original_svg();
+                offset(r = -tolerancia) dibujo_original();
             
+            // 3. Agarre trasero
             translate([0, 0, 2])
-                cylinder(h = wall_height - 2, r1 = 12, r2 = 8);
+                cylinder(h = wall_height - 2, r = 10);
         }}
     }}
 }}
