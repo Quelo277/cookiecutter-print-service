@@ -48,7 +48,8 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Instalar dependencias Python
-RUN pip3 install --no-cache-dir -r requirements.txt
+#RUN pip3 install --no-cache-dir -r requirements.txt
+RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 
 # --- 4. Copiar codigo fuente ---
 COPY . .
