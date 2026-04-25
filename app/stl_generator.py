@@ -133,53 +133,64 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
     """
-    Genera el archivo OpenSCAD (.scad) para un CORTANTE (no un sello).
-    Toma el SVG y extruye solo el borde para formar la pared cortante.
+    Genera un set de dos piezas: 
+    1. Cortante exterior con mango.
+    2. Sello interior (estampador) con soporte.
     """
-    # Explicación de la lógica:
-    # 1. Importamos el SVG.
-    # 2. Hacemos un offset positivo ( wt/2 ) y uno negativo ( -wt/2 ) de la misma forma.
-    # 3. Restamos el más chico al más grande ( difference() ).
-    # 4. El resultado es un "anillo" o borde perfecto de grosor 'wt'.
-    # 5. Extruimos ese borde hacia arriba 'wh'.
-    
     scad_code = f"""
-// CookieCutterPrintService - Gema Makers
-// Cortante generado automáticamente
-
+// Parametros de Gema Makers
 wall_height = {wh};
 wall_thickness = {wt};
 handle_height = {hh};
 handle_thickness = {ht};
+tolerancia = 0.5; // Espacio para que el sello deslice dentro
 
-// El DXF/SVG importado define la silueta.
-// Usamos offset() para generar el grosor de la pared.
-
-union() {{
-    // PARED CORTANTE (Extrusión de borde)
-    linear_extrude(height = wall_height, convexity = 10) {{
-        difference() {{
-            // Borde exterior
-            offset(r = wall_thickness / 2)
-                import("{svg_path}", center = true, dpi = 96);
-            // Borde interior (lo que vaciamos)
-            offset(r = -wall_thickness / 2)
-                import("{svg_path}", center = true, dpi = 96);
-        }}
+module pieza_exterior() {{
+    union() {{
+        // Pared de corte
+        linear_extrude(height = wall_height)
+            difference() {{
+                offset(r = wall_thickness / 2) 
+                    import("{svg_path}", center = true, dpi = 96);
+                offset(r = -wall_thickness / 2) 
+                    import("{svg_path}", center = true, dpi = 96);
+            }}
+        // Mango exterior
+        linear_extrude(height = handle_height)
+            difference() {{
+                offset(r = handle_thickness) 
+                    import("{svg_path}", center = true, dpi = 96);
+                offset(r = -wall_thickness / 2) 
+                    import("{svg_path}", center = true, dpi = 96);
+            }}
     }}
+}}
 
-    // BASE / MANGO DE APOYO
-    linear_extrude(height = handle_height) {{
-        difference() {{
-            // Base ancha
-            offset(r = handle_thickness)
-                import("{svg_path}", center = true, dpi = 96);
-            // Vaciado interior (para que no sea un bloque sólido)
-            offset(r = -wall_thickness / 2)
-                import("{svg_path}", center = true, dpi = 96);
+module pieza_interior() {{
+    // Desplazamos el sello a la derecha para que se impriman por separado
+    // o podes comentarlo si queres generar dos STLs distintos
+    translate([100, 0, 0]) {{ 
+        union() {{
+            // Base del estampado (la que toca la masa)
+            linear_extrude(height = 3) // Espesor de la placa del sello
+                offset(r = -wall_thickness / 2 - tolerancia) 
+                    import("{svg_path}", center = true, dpi = 96);
+            
+            // Detalles internos (ojos, nariz, etc.) 
+            // Suben un poco mas para marcar bien
+            linear_extrude(height = 5) 
+                offset(r = -wall_thickness / 2 - tolerancia)
+                    import("{svg_path}", center = true, dpi = 96);
+
+            // Mango del sello para agarrarlo
+            translate([0,0,3])
+            cylinder(h = wall_height - 3, r1 = 10, r2 = 8, $fn=32);
         }}
     }}
 }}
+
+pieza_exterior();
+pieza_interior();
 """
     with open(scad_path, "w") as f:
         f.write(scad_code)
