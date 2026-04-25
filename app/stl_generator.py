@@ -7,9 +7,11 @@ import numpy as np
 from stl import mesh
 from PIL import Image
 
+# Importamos las constantes de configuración
 from app.config import (
     WALL_HEIGHT, WALL_THICKNESS, HANDLE_HEIGHT, HANDLE_THICKNESS,
-    STL_DIR, PREVIEW_DIR, UPLOAD_DIR
+    STL_DIR, PREVIEW_DIR, UPLOAD_DIR,
+    COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, CURRENCY, CURRENCY_SYMBOL
 )
 
 def validate_image(file_path: str) -> Tuple[bool, str]:
@@ -22,7 +24,6 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
         return False, str(e)
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
-    # Preparamos la imagen para Potrace
     cmd = ["convert", input_path, "-colorspace", "Gray", "-negate", "-threshold", "50%", output_pnm]
     subprocess.run(cmd, check=True)
 
@@ -31,21 +32,22 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
     subprocess.run(cmd, check=True)
 
 def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
-    # PASO CLAVE PAPOOCH: Inkscape crea la silueta sólida
+    # Lógica de Papooch para rellenar siluetas
     cmd = [
         "inkscape", input_svg, "--batch-process",
         "--actions=select-all;path-combine;path-fill;export-filename:" + output_filled_svg + ";export-do"
     ]
     subprocess.run(cmd, check=True)
 
-def image_to_stl(image_path, output_name, **kwargs) -> dict:
+def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
     wh = kwargs.get("wall_height") or WALL_HEIGHT
     wt = kwargs.get("wall_thickness") or WALL_THICKNESS
     
-    work_dir = Path(f"/tmp/{output_name}") # Carpeta temporal de procesamiento
+    # Usamos /tmp para no ensuciar el volumen persistente con archivos temporales
+    work_dir = Path(f"/tmp/{output_name}")
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = {
+    p = {
         "pnm": str(work_dir / "temp.pnm"),
         "svg": str(work_dir / "orig.svg"),
         "filled": str(work_dir / "filled.svg"),
@@ -55,39 +57,37 @@ def image_to_stl(image_path, output_name, **kwargs) -> dict:
     }
 
     try:
-        _binarize_image(image_path, paths["pnm"])
-        _vectorize_to_svg(paths["pnm"], paths["svg"])
-        _generate_filled_svg(paths["svg"], paths["filled"])
+        _binarize_image(image_path, p["pnm"])
+        _vectorize_to_svg(p["pnm"], p["svg"])
+        _generate_filled_svg(p["svg"], p["filled"])
 
-        # Generar código OpenSCAD con la lógica de Papooch
         scad_code = f"""
 $fn = 16;
-module original() {{ import("{paths['svg']}", center=true, dpi=96); }}
-module rellena() {{ import("{paths['filled']}", center=true, dpi=96); }}
+module original() {{ import("{p['svg']}", center=true, dpi=96); }}
+module rellena() {{ import("{p['filled']}", center=true, dpi=96); }}
 
 // Cortante
 linear_extrude(height={wh}) difference() {{
     offset(r={wt}) rellena();
     rellena();
 }}
-// Sello (se genera al lado para imprimir por separado)
+// Sello
 translate([120, 0, 0]) {{
     linear_extrude(height=2) offset(r=-0.6) rellena();
     linear_extrude(height=5) offset(r=-0.6) original();
 }}
 """
-        with open(paths["scad"], "w") as f: f.write(scad_code)
+        with open(p["scad"], "w") as f: f.write(scad_code)
 
-        # Renderizado final
-        subprocess.run(["openscad", "-o", paths["stl"], paths["scad"]], check=True)
+        subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True)
         
-        # Medir volumen y dimensiones
-        m = mesh.Mesh.from_file(paths["stl"])
+        # Procesamiento de malla
+        m = mesh.Mesh.from_file(p["stl"])
         volume_mm3, _, _ = m.get_mass_properties()
         dims = [m.x.max()-m.x.min(), m.y.max()-m.y.min(), m.z.max()-m.z.min()]
 
         final_stl = str(STL_DIR / f"{output_name}.stl")
-        shutil.copy2(paths["stl"], final_stl)
+        shutil.copy2(p["stl"], final_stl)
         
         return {
             "exito": True,
@@ -97,3 +97,18 @@ translate([120, 0, 0]) {{
         }
     except Exception as e:
         return {"exito": False, "mensaje": str(e), "volumen_cm3": 0, "dimensiones": [0,0,0]}
+
+# --- LA FUNCIÓN QUE FALTABA ---
+def calculate_price(volumen_cm3: float) -> dict:
+    """Calcula el precio basado en la configuración de Gema Makers."""
+    costo_mat = volumen_cm3 * COSTO_FILAMENTO_POR_CM3
+    total = (costo_mat + COSTO_BASE) * MARGEN
+    return {
+        "precio_final": round(total, 2),
+        "volumen_cm3": round(volumen_cm3, 4),
+        "costo_materiales": round(costo_mat, 2),
+        "costo_base": COSTO_BASE,
+        "margen": MARGEN,
+        "moneda": CURRENCY,
+        "simbolo": CURRENCY_SYMBOL
+    }
