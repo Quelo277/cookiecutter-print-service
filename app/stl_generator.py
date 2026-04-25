@@ -94,7 +94,7 @@ def image_to_stl(
             "stl_path": final_stl,
             "preview_path": paths["preview_png"],
             "volumen_cm3": round(volumen_cm3, 4),
-            "dimensiones_mm": [round(d, 2) for d in dimensiones],
+            "dimensiones": [round(d, 2) for d in dimensiones],  # Volvemos a 'dimensiones'
             "exito": True,
             "mensaje": "STL generado exitosamente",
             "parametros": {
@@ -110,7 +110,7 @@ def image_to_stl(
             "exito": False,
             "mensaje": f"Error en pipeline STL: {str(e)}",
             "volumen_cm3": 0.0,
-            "dimensiones_mm": [0, 0, 0]
+            "dimensiones": [0, 0, 0]
         }
 
 
@@ -132,18 +132,15 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
-    # Agregamos r=0.01 al offset para asegurar que siempre haya una geometría válida
     scad_code = f"""
 wall_height = {wh};
 wall_thickness = {wt};
 handle_height = {hh};
 handle_thickness = {ht};
 
-// Pared del cortante
 linear_extrude(height = wall_height, convexity = 10)
     import("{svg_path}", center = true, dpi = 96);
 
-// Base de apoyo (Mango)
 linear_extrude(height = handle_height)
     offset(r = handle_thickness)
         import("{svg_path}", center = true, dpi = 96);
@@ -158,11 +155,10 @@ def _render_stl(scad_path: str, stl_path: str) -> None:
 
 
 def _calculate_volume(stl_path: str) -> Tuple[float, Tuple[float, float, float]]:
-    """Calcula volumen y dimensiones forzando tipos nativos de Python."""
     m = mesh.Mesh.from_file(stl_path)
     volume_mm3, _, _ = m.get_mass_properties()
     
-    # IMPORTANTE: Convertimos de numpy.float32 a float nativo
+    # .item() o float() para que FastAPI no explote con NumPy
     vol_cm3 = float(volume_mm3 / 1000.0)
     
     dims = (
