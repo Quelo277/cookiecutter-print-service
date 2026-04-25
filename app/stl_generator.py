@@ -133,55 +133,61 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 def _generate_openscad_svg(svg_path: str, scad_path: str, wh, wt, hh, ht) -> None:
     """
-    Versión optimizada para evitar Timeouts.
-    Genera cortante y sello con geometría simplificada.
+    Generador optimizado estilo Papooch.
+    Separa el corte perimetral de los detalles internos.
     """
     scad_code = f"""
-// Configuración de resolución (Menos es más rápido)
-$fn = 16; 
+$fn = 16;
 wall_height = {wh};
 wall_thickness = {wt};
 handle_height = {hh};
 handle_thickness = {ht};
-tolerancia = 0.6; 
+tolerancia = 0.6;
 
-module silueta() {{
+module imagen_base() {{
     import("{svg_path}", center = true, dpi = 96);
 }}
 
-// 1. PIEZA EXTERIOR (CORTANTE)
-union() {{
-    // Pared de corte: Usamos un offset simple hacia afuera
-    linear_extrude(height = wall_height)
-        difference() {{
-            offset(r = wall_thickness) silueta();
-            silueta();
-        }}
-    // Mango: Base de apoyo
-    linear_extrude(height = handle_height)
-        difference() {{
-            offset(r = handle_thickness) silueta();
-            silueta();
-        }}
-}}
-
-// 2. PIEZA INTERIOR (SELLO)
-// Separada para que no colisionen en la cama de impresión
-translate([100, 0, 0]) {{
+// PIEZA 1: EL CORTANTE EXTERIOR (Solo el borde)
+module cortante_exterior() {{
     union() {{
-        // Base del sello (reducida por tolerancia)
-        linear_extrude(height = 3)
-            offset(r = -tolerancia) silueta();
+        // Pared de corte principal
+        linear_extrude(height = wall_height)
+            difference() {{
+                offset(r = wall_thickness) imagen_base();
+                offset(r = 0) imagen_base();
+            }}
         
-        // Detalles internos
-        linear_extrude(height = 5)
-            offset(r = -tolerancia - 0.2) silueta();
-
-        // Agarre (Cilindro simple para no estresar el render)
-        translate([0, 0, 3])
-            cylinder(h = wall_height - 3, r1 = 8, r2 = 6);
+        // Mango (Base de apoyo)
+        linear_extrude(height = handle_height)
+            difference() {{
+                offset(r = handle_thickness) imagen_base();
+                offset(r = 0) imagen_base();
+            }}
     }}
 }}
+
+// PIEZA 2: EL SELLO (Estampador con detalles)
+module sello_interior() {{
+    translate([100, 0, 0]) {{ // Separación para imprimir
+        union() {{
+            // Placa base del sello (Une todos los detalles)
+            linear_extrude(height = 2)
+                offset(r = -tolerancia) imagen_base();
+            
+            // Los detalles que sobresalen para marcar la masa
+            linear_extrude(height = 4)
+                offset(r = -tolerancia - 0.3) imagen_base();
+            
+            // Agarre tipo "botón" central
+            translate([0, 0, 2])
+                cylinder(h = wall_height - 2, r1 = 12, r2 = 8);
+        }}
+    }}
+}}
+
+cortante_exterior();
+sello_interior();
 """
     with open(scad_path, "w") as f:
         f.write(scad_code)
