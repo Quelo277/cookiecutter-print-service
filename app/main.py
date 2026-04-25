@@ -1,5 +1,5 @@
 """
-CookieCutterPrintService - FastAPI Backend
+CookieCutterPrintService - FastAPI Backend  .
 API REST para conversion de imagenes a cortantes STL y presupuestos de impresion 3D.
 """
 import os
