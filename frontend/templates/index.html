@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CookieCutterPrintService - Cortantes 3D</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Three.js para preview 3D -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container header-content">
+            <div class="logo">
+                <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+                    <circle cx="18" cy="18" r="16" stroke="#FF6B35" stroke-width="2.5" fill="none"/>
+                    <circle cx="18" cy="18" r="6" fill="#FF6B35"/>
+                    <rect x="16" y="2" width="4" height="8" rx="2" fill="#FF6B35"/>
+                </svg>
+                <span class="logo-text">CookieCutter<span class="logo-highlight">Print</span></span>
+            </div>
+            <a href="/admin" class="btn-admin">Panel Admin</a>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <!-- Hero -->
+            <section class="hero">
+                <h1>Converti tu imagen en un <span class="gradient-text">cortante 3D</span></h1>
+                <p class="hero-desc">
+                    Subi una imagen con fondo contrastante y obtene un presupuesto instantaneo 
+                    para tu cortante de galletas impreso en 3D.
+                </p>
+            </section>
+
+            <!-- Paso 1: Upload -->
+            <section class="step" id="step-upload">
+                <div class="step-header">
+                    <span class="step-number">1</span>
+                    <h2>Subi tu imagen</h2>
+                </div>
+
+                <div class="upload-zone" id="upload-zone">
+                    <input type="file" id="file-input" accept=".jpg,.jpeg,.png" hidden>
+                    <div class="upload-content">
+                        <svg class="upload-icon" width="64" height="64" viewBox="0 0 64 64" fill="none">
+                            <path d="M32 8v36M18 30l14-14 14 14" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M12 52h40" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                        </svg>
+                        <p class="upload-text"><strong>Arrastra una imagen aqui</strong> o haz clic para seleccionar</p>
+                        <p class="upload-hint">JPG o PNG con fondo contrastante (max 10 MB)</p>
+                    </div>
+                    <img id="preview-image" class="preview-image hidden" alt="Preview">
+                </div>
+
+                <!-- Parametros opcionales -->
+                <div class="params-section">
+                    <button type="button" class="params-toggle" id="params-toggle">
+                        <span>Parametros avanzados (opcional)</span>
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" class="chevron">
+                            <path d="M5 8l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                    <div class="params-grid hidden" id="params-grid">
+                        <div class="param-field">
+                            <label for="wall-height">Altura pared (mm)</label>
+                            <input type="number" id="wall-height" value="15" min="5" max="50" step="1">
+                        </div>
+                        <div class="param-field">
+                            <label for="wall-thickness">Grosor pared (mm)</label>
+                            <input type="number" id="wall-thickness" value="1.2" min="0.4" max="5" step="0.1">
+                        </div>
+                        <div class="param-field">
+                            <label for="handle-height">Altura mango (mm)</label>
+                            <input type="number" id="handle-height" value="8" min="3" max="20" step="1">
+                        </div>
+                        <div class="param-field">
+                            <label for="handle-thickness">Grosor mango (mm)</label>
+                            <input type="number" id="handle-thickness" value="3" min="1" max="10" step="0.5">
+                        </div>
+                    </div>
+                </div>
+
+                <button class="btn-primary btn-full" id="btn-generate" disabled>
+                    <span class="btn-text">Generar cortante y presupuesto</span>
+                    <span class="btn-loader hidden"></span>
+                </button>
+            </section>
+
+            <!-- Paso 2: Resultado -->
+            <section class="step hidden" id="step-result">
+                <div class="step-header">
+                    <span class="step-number">2</span>
+                    <h2>Tu presupuesto</h2>
+                </div>
+
+                <div class="result-grid">
+                    <!-- Preview 3D -->
+                    <div class="preview-3d-container">
+                        <div class="preview-3d-header">
+                            <h3>Vista previa 3D</h3>
+                            <span class="badge-stl">STL</span>
+                        </div>
+                        <div id="threejs-container"></div>
+                        <p class="preview-hint">Arrastra para rotar · Rueda para zoom</p>
+                    </div>
+
+                    <!-- Info y precio -->
+                    <div class="quote-card">
+                        <h3>Detalle del modelo</h3>
+                        
+                        <div class="specs-list">
+                            <div class="spec-item">
+                                <span class="spec-label">Volumen</span>
+                                <span class="spec-value" id="spec-volume">-- cm³</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Dimensiones</span>
+                                <span class="spec-value" id="spec-dims">-- x -- x -- mm</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Material</span>
+                                <span class="spec-value">PLA Food-Safe</span>
+                            </div>
+                        </div>
+
+                        <div class="price-section">
+                            <div class="price-breakdown">
+                                <div class="breakdown-row">
+                                    <span>Costo materiales</span>
+                                    <span id="price-materials">--</span>
+                                </div>
+                                <div class="breakdown-row">
+                                    <span>Costo base</span>
+                                    <span id="price-base">--</span>
+                                </div>
+                                <div class="breakdown-row">
+                                    <span>Margen</span>
+                                    <span id="price-margin">--</span>
+                                </div>
+                            </div>
+                            <div class="price-total">
+                                <span class="price-total-label">Total estimado</span>
+                                <span class="price-total-value" id="price-total">--</span>
+                            </div>
+                        </div>
+
+                        <a id="download-stl" href="#" class="btn-secondary btn-full" download>
+                            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                                <path d="M9 2v8M5 8l4 4 4-4M3 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            Descargar STL
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Paso 3: Confirmar pedido -->
+                <div class="order-section" id="order-section">
+                    <div class="step-header">
+                        <span class="step-number">3</span>
+                        <h2>Hace tu pedido</h2>
+                    </div>
+
+                    <form class="order-form" id="order-form">
+                        <div class="form-grid">
+                            <div class="form-field">
+                                <label for="order-name">Nombre completo *</label>
+                                <input type="text" id="order-name" required placeholder="Tu nombre">
+                            </div>
+                            <div class="form-field">
+                                <label for="order-email">Email *</label>
+                                <input type="email" id="order-email" required placeholder="tu@email.com">
+                            </div>
+                            <div class="form-field">
+                                <label for="order-phone">Telefono</label>
+                                <input type="tel" id="order-phone" placeholder="+54 9 11 1234-5678">
+                            </div>
+                            <div class="form-field form-field-full">
+                                <label for="order-notes">Notas adicionales</label>
+                                <textarea id="order-notes" rows="3" placeholder="Color preferido, comentarios, etc."></textarea>
+                            </div>
+                        </div>
+
+                        <label class="checkbox-field">
+                            <input type="checkbox" id="order-accept" required>
+                            <span class="checkmark"></span>
+                            <span>Acepto el presupuesto y quiero proceder con el pedido</span>
+                        </label>
+
+                        <button type="submit" class="btn-primary btn-full btn-order">
+                            <span class="btn-text">Confirmar pedido</span>
+                            <span class="btn-loader hidden"></span>
+                        </button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Mensaje de exito -->
+            <section class="step hidden" id="step-success">
+                <div class="success-card">
+                    <div class="success-icon">
+                        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                            <circle cx="32" cy="32" r="28" stroke="#22c55e" stroke-width="3" fill="none"/>
+                            <path d="M20 34l8 8 16-16" stroke="#22c55e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <h2>Pedido confirmado!</h2>
+                    <p>Tu pedido fue registrado exitosamente. Te contactaremos por email para coordinar el pago y envio.</p>
+                    <div class="success-details" id="success-details"></div>
+                    <button class="btn-primary" onclick="location.reload()">Nuevo presupuesto</button>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <p>CookieCutterPrintService &copy; 2025 - Impresion 3D de cortantes de galletas</p>
+        </div>
+    </footer>
+
+    <!-- Toast notifications -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

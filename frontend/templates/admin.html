@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel Admin - CookieCutterPrintService</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body class="admin-body">
+    <!-- Header -->
+    <header class="header">
+        <div class="container header-content">
+            <div class="logo">
+                <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+                    <circle cx="18" cy="18" r="16" stroke="#FF6B35" stroke-width="2.5" fill="none"/>
+                    <circle cx="18" cy="18" r="6" fill="#FF6B35"/>
+                    <rect x="16" y="2" width="4" height="8" rx="2" fill="#FF6B35"/>
+                </svg>
+                <span class="logo-text">CookieCutter<span class="logo-highlight">Print</span></span>
+            </div>
+            <a href="/" class="btn-admin">Volver al inicio</a>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <h1 class="admin-title">Panel de Administracion</h1>
+
+            <!-- Stats cards -->
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-card skeleton"></div>
+                <div class="stat-card skeleton"></div>
+                <div class="stat-card skeleton"></div>
+                <div class="stat-card skeleton"></div>
+            </div>
+
+            <!-- Filters -->
+            <div class="filters-bar">
+                <div class="filter-group">
+                    <label>Filtrar por estado:</label>
+                    <select id="filter-estado" class="filter-select">
+                        <option value="">Todos</option>
+                        <option value="pendiente" selected>Pendientes</option>
+                        <option value="en_proceso">En proceso</option>
+                        <option value="completado">Completados</option>
+                        <option value="cancelado">Cancelados</option>
+                    </select>
+                </div>
+                <button class="btn-primary btn-sm" id="btn-refresh">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M2 8a6 6 0 0110.24-4.24M14 8a6 6 0 01-10.24 4.24M14 4v4h-4M2 12v-4h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    Actualizar
+                </button>
+            </div>
+
+            <!-- Orders table -->
+            <div class="table-container">
+                <table class="orders-table" id="orders-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Fecha</th>
+                            <th>Cliente</th>
+                            <th>Email</th>
+                            <th>Volumen</th>
+                            <th>Precio</th>
+                            <th>Estado</th>
+                            <th>Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody id="orders-tbody">
+                        <tr class="loading-row">
+                            <td colspan="8">Cargando pedidos...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toast -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script>
+        const currencySymbol = '{{ currency_symbol }}';
+
+        // Cargar estadisticas
+        async function loadStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                document.getElementById('stats-grid').innerHTML = `
+                    <div class="stat-card">
+                        <span class="stat-number">${data.total_orders}</span>
+                        <span class="stat-label">Total pedidos</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-number" style="color: #f59e0b;">${data.pendientes}</span>
+                        <span class="stat-label">Pendientes</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-number" style="color: #22c55e;">${data.completados}</span>
+                        <span class="stat-label">Completados</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-number">${currencySymbol}${data.ingresos_totales.toFixed(2)}</span>
+                        <span class="stat-label">Ingresos totales</span>
+                    </div>
+                `;
+            } catch (e) {
+                console.error('Error cargando stats:', e);
+            }
+        }
+
+        // Cargar pedidos
+        async function loadOrders(estado = '') {
+            const tbody = document.getElementById('orders-tbody');
+            tbody.innerHTML = '<tr class="loading-row"><td colspan="8">Cargando pedidos...</td></tr>';
+
+            try {
+                const url = estado ? `/api/orders?estado=${estado}` : '/api/orders';
+                const res = await fetch(url);
+                const data = await res.json();
+
+                if (data.orders.length === 0) {
+                    tbody.innerHTML = '<tr class="loading-row"><td colspan="8">No hay pedidos</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.orders.map(o => {
+                    const estadoClass = {
+                        'pendiente': 'status-pendiente',
+                        'en_proceso': 'status-proceso',
+                        'completado': 'status-completado',
+                        'cancelado': 'status-cancelado'
+                    }[o.estado] || 'status-pendiente';
+
+                    const fecha = new Date(o.created_at).toLocaleDateString('es-AR');
+
+                    return `
+                        <tr>
+                            <td>#${o.id}</td>
+                            <td>${fecha}</td>
+                            <td><strong>${o.nombre}</strong></td>
+                            <td>${o.email}</td>
+                            <td>${o.volumen_cm3.toFixed(2)} cm³</td>
+                            <td><strong>${currencySymbol}${o.precio.toFixed(2)}</strong></td>
+                            <td><span class="status-badge ${estadoClass}">${o.estado}</span></td>
+                            <td>
+                                <select class="action-select" onchange="updateStatus(${o.id}, this.value)">
+                                    <option value="">Cambiar estado</option>
+                                    <option value="pendiente" ${o.estado === 'pendiente' ? 'selected' : ''}>Pendiente</option>
+                                    <option value="en_proceso" ${o.estado === 'en_proceso' ? 'selected' : ''}>En proceso</option>
+                                    <option value="completado" ${o.estado === 'completado' ? 'selected' : ''}>Completado</option>
+                                    <option value="cancelado" ${o.estado === 'cancelado' ? 'selected' : ''}>Cancelado</option>
+                                </select>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (e) {
+                tbody.innerHTML = `<tr class="loading-row"><td colspan="8">Error: ${e.message}</td></tr>`;
+            }
+        }
+
+        // Actualizar estado
+        async function updateStatus(orderId, estado) {
+            if (!estado) return;
+            try {
+                const res = await fetch(`/api/orders/${orderId}/status?estado=${estado}`, {
+                    method: 'PATCH'
+                });
+                if (res.ok) {
+                    showToast('Estado actualizado', 'success');
+                    loadStats();
+                    loadOrders(document.getElementById('filter-estado').value);
+                } else {
+                    showToast('Error al actualizar', 'error');
+                }
+            } catch (e) {
+                showToast('Error de red', 'error');
+            }
+        }
+
+        // Toast
+        function showToast(msg, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = msg;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 4000);
+        }
+
+        // Eventos
+        document.getElementById('filter-estado').addEventListener('change', (e) => {
+            loadOrders(e.target.value);
+        });
+
+        document.getElementById('btn-refresh').addEventListener('click', () => {
+            loadStats();
+            loadOrders(document.getElementById('filter-estado').value);
+        });
+
+        // Inicializar
+        loadStats();
+        loadOrders('pendiente');
+    </script>
+</body>
+</html>
