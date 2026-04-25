@@ -20,29 +20,30 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
         return False, str(e)
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
-    # 1. Agregamos un borde blanco generoso para despegar la imagen de los bordes del lienzo.
-    # 2. Limpiamos el ruido para que la silueta sea clara.
+    # Agregamos un borde blanco y usamos -trim para asegurar que no haya bordes negros
+    # que potrace interprete como un rectángulo exterior.
     subprocess.run([
-        "convert", input_path, 
-        "-bordercolor", "white", "-border", "50",
-        "-trim", "+repage", # Elimina bordes basura de la imagen original
-        "-border", "20",     # Agrega espacio de seguridad real
-        "-colorspace", "Gray", 
-        "-negate", 
-        "-threshold", "50%", 
+        "convert", input_path,
+        "-alpha", "remove", 
+        "-bordercolor", "white", "-border", "10",
+        "-trim", "+repage",
+        "-threshold", "50%",
+        "-negate", # Invertimos para que potrace detecte la figura
         output_pnm
     ], check=True)
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
-    # Usamos -a 0 para que no suavice demasiado y pierda detalles internos
-    subprocess.run(["potrace", "-s", "--unit", "1", "-a", "0", "-o", output_svg, bnw_pnm], check=True)
+    # potrace genera el SVG de la silueta negra
+    subprocess.run(["potrace", "-s", "--unit", "1", "-o", output_svg, bnw_pnm], check=True)
 
 def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
     wh = float(kwargs.get("wall_height") or WALL_HEIGHT)
     wt = float(kwargs.get("wall_thickness") or WALL_THICKNESS)
+    
+    # Altura del dibujo interno al 60% de la pared de corte
     detail_height = wh * 0.6 
 
-    work_dir = Path(f"/tmp/{output_name}")
+    work_dir = Path(f"/tmp/gema_{output_name}")
     work_dir.mkdir(parents=True, exist_ok=True)
 
     p = {
@@ -56,53 +57,67 @@ def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
         _binarize_image(image_path, p["pnm"])
         _vectorize_to_svg(p["pnm"], p["svg"])
 
-        # LÓGICA OPENSCAD: 
-        # Construimos el cortante DESDE la silueta, no restando el lienzo.
+        # Lógica OpenSCAD:
+        # offset(r=0.5) sobre la silueta para la tolerancia que pediste.
         scad_code = f"""
 $fn = 32;
-module original_path() {{
-    // Importamos con un pequeño escalado si es necesario
+module silhouette() {{
     import("{p['svg']}", center=true, dpi=96);
 }}
 
-// 1. PARED DE CORTE (Contorno exterior)
-// Hacemos un "minkowski" o un offset simple para crear el grosor hacia afuera
+// 1. PARED DE CORTE (Solo el contorno con tolerancia de 0.5mm)
 color("orange")
 linear_extrude(height={wh})
     difference() {{
-        offset(r={wt}) original_path();
-        original_path();
+        offset(r={wt + 0.5}) silhouette();
+        offset(r=0.5) silhouette();
     }}
 
-// 2. SELLO INTERNO (El dibujo completo)
-// Lo extruimos a menor altura para marcar la masa sin cortarla
+// 2. DETALLE INTERNO (Más bajo que el contorno)
 color("darkorange")
 linear_extrude(height={detail_height})
-    original_path();
+    offset(r=0.5) silhouette();
 
-// 3. SOPORTE DE UNIÓN (Base fina para que no se separen las piezas)
-linear_extrude(height=1.2)
-    offset(r={wt * 0.5}) original_path();
+// 3. BASE DE UNIÓN (Para que las piezas internas no queden sueltas)
+linear_extrude(height=1.0)
+    offset(r={wt + 1}) silhouette();
 """
-        with open(p["scad"], "w") as f: f.write(scad_code)
+        with open(p["scad"], "w") as f:
+            f.write(scad_code)
         
+        # Ejecutar OpenSCAD
         subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True)
         
+        # Medir volumen y dimensiones
         m = mesh.Mesh.from_file(p["stl"])
         volume_mm3, _, _ = m.get_mass_properties()
-        dims = [float(m.x.max() - m.x.min()), float(m.y.max() - m.y.min()), float(m.z.max() - m.z.min())]
+        volumen_cm3 = float(volume_mm3) / 1000.0
         
-        shutil.copy2(p["stl"], str(STL_DIR / f"{output_name}.stl"))
+        dims = [
+            float(m.x.max() - m.x.min()), 
+            float(m.y.max() - m.y.min()), 
+            float(m.z.max() - m.z.min())
+        ]
+
+        # Guardar resultado final
+        final_stl = STL_DIR / f"{output_name}.stl"
+        shutil.copy2(p["stl"], str(final_stl))
+        
+        # --- LIMPIEZA DE DISCO ---
+        # Borramos la carpeta temporal de esta operación
+        shutil.rmtree(work_dir)
         
         return {
             "exito": True,
             "job_id": output_name,
-            "volumen_cm3": round(float(volume_mm3)/1000.0, 4),
+            "volumen_cm3": round(volumen_cm3, 4),
             "dimensiones": [round(d, 2) for d in dims],
             "stl_url": f"/api/download/{output_name}.stl",
-            "mensaje": "OK"
+            "mensaje": "Generado con éxito"
         }
     except Exception as e:
+        if work_dir.exists():
+            shutil.rmtree(work_dir)
         return {"exito": False, "mensaje": str(e)}
 
 def calculate_price(volumen_cm3: float) -> dict:
