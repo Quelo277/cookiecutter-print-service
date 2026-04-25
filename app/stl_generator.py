@@ -3,21 +3,15 @@ import subprocess
 import shutil
 from pathlib import Path
 from typing import Optional, Tuple
-import numpy as np
 from stl import mesh
 from PIL import Image
 
 from app.config import (
-    WALL_HEIGHT, WALL_THICKNESS, HANDLE_HEIGHT, HANDLE_THICKNESS,
-    STL_DIR, PREVIEW_DIR, UPLOAD_DIR,
+    WALL_HEIGHT, WALL_THICKNESS, STL_DIR, 
     COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, CURRENCY, CURRENCY_SYMBOL
 )
 
 def validate_image(file_path: str) -> Tuple[bool, str]:
-    """
-    Valida que el archivo sea una imagen legible para PIL.
-    Restaurada para evitar el ImportError en main.py.
-    """
     try:
         with Image.open(file_path) as img:
             img.verify()
@@ -26,26 +20,27 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
         return False, str(e)
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
-    # Pre-procesamiento con borde para evitar el rectángulo exterior
+    # 1. Agregamos un borde blanco generoso para despegar la imagen de los bordes del lienzo.
+    # 2. Limpiamos el ruido para que la silueta sea clara.
     subprocess.run([
         "convert", input_path, 
-        "-bordercolor", "white", "-border", "20",
+        "-bordercolor", "white", "-border", "50",
+        "-trim", "+repage", # Elimina bordes basura de la imagen original
+        "-border", "20",     # Agrega espacio de seguridad real
         "-colorspace", "Gray", 
         "-negate", 
-        "-threshold", "40%", 
+        "-threshold", "50%", 
         output_pnm
     ], check=True)
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
-    # Vectorización limpia
-    subprocess.run(["potrace", "-s", "--unit", "1", "-o", output_svg, bnw_pnm], check=True)
+    # Usamos -a 0 para que no suavice demasiado y pierda detalles internos
+    subprocess.run(["potrace", "-s", "--unit", "1", "-a", "0", "-o", output_svg, bnw_pnm], check=True)
 
 def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
     wh = float(kwargs.get("wall_height") or WALL_HEIGHT)
     wt = float(kwargs.get("wall_thickness") or WALL_THICKNESS)
-    
-    # Altura del dibujo interno (sello) al 50% de la pared de corte
-    detail_height = wh * 0.5 
+    detail_height = wh * 0.6 
 
     work_dir = Path(f"/tmp/{output_name}")
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -61,43 +56,41 @@ def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
         _binarize_image(image_path, p["pnm"])
         _vectorize_to_svg(p["pnm"], p["svg"])
 
-        # Lógica OpenSCAD: Pared exterior fina + Sello interno
+        # LÓGICA OPENSCAD: 
+        # Construimos el cortante DESDE la silueta, no restando el lienzo.
         scad_code = f"""
 $fn = 32;
-module silhouette() {{
+module original_path() {{
+    // Importamos con un pequeño escalado si es necesario
     import("{p['svg']}", center=true, dpi=96);
 }}
 
-// 1. PARED DE CORTE (Contorno fino)
+// 1. PARED DE CORTE (Contorno exterior)
+// Hacemos un "minkowski" o un offset simple para crear el grosor hacia afuera
 color("orange")
-linear_extrude(height={wh}) 
+linear_extrude(height={wh})
     difference() {{
-        offset(r={wt/2}) silhouette();
-        offset(r=-{wt/2}) silhouette();
+        offset(r={wt}) original_path();
+        original_path();
     }}
 
-// 2. SELLO INTERNO (Relieve)
+// 2. SELLO INTERNO (El dibujo completo)
+// Lo extruimos a menor altura para marcar la masa sin cortarla
 color("darkorange")
-linear_extrude(height={detail_height}) 
-    silhouette();
+linear_extrude(height={detail_height})
+    original_path();
 
-// 3. BASE DE UNIÓN (Capa técnica de 0.8mm)
-linear_extrude(height=0.8)
-    offset(r=0.5) silhouette();
+// 3. SOPORTE DE UNIÓN (Base fina para que no se separen las piezas)
+linear_extrude(height=1.2)
+    offset(r={wt * 0.5}) original_path();
 """
         with open(p["scad"], "w") as f: f.write(scad_code)
         
-        # Generar STL
         subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True)
         
-        # Calcular propiedades físicas
         m = mesh.Mesh.from_file(p["stl"])
         volume_mm3, _, _ = m.get_mass_properties()
-        dims = [
-            float(m.x.max() - m.x.min()), 
-            float(m.y.max() - m.y.min()), 
-            float(m.z.max() - m.z.min())
-        ]
+        dims = [float(m.x.max() - m.x.min()), float(m.y.max() - m.y.min()), float(m.z.max() - m.z.min())]
         
         shutil.copy2(p["stl"], str(STL_DIR / f"{output_name}.stl"))
         
