@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 from stl import mesh
 from PIL import Image
+import numpy as np
 
 from app.config import (
     WALL_HEIGHT, WALL_THICKNESS, STL_DIR, UPLOAD_DIR, PREVIEW_DIR,
@@ -13,7 +14,6 @@ from app.config import (
 )
 
 def validate_image(file_path: str) -> Tuple[bool, str]:
-    """Valida que el archivo sea una imagen legible."""
     try:
         with Image.open(file_path) as img:
             img.verify()
@@ -22,19 +22,16 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
         return False, str(e)
 
 def _cleanup_vps_disk():
-    """Mantiene el disco limpio para evitar los 70GB de basura."""
     now = time.time()
     for folder in [UPLOAD_DIR, PREVIEW_DIR, Path("/tmp")]:
         for f in folder.glob("*"):
             try:
-                # Borramos temporales de más de 10 minutos
                 if f.is_file() and (now - f.stat().st_mtime) > 600:
                     if "gema_gen_" in f.name or folder != Path("/tmp"):
                         f.unlink()
             except: pass
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
-    """Procesamiento para eliminar el rectángulo y limpiar bordes."""
     subprocess.run([
         "convert", input_path,
         "-alpha", "remove", "-background", "white", "-flatten",
@@ -47,7 +44,6 @@ def _binarize_image(input_path: str, output_pnm: str) -> None:
     ], check=True)
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
-    """Genera el vector limpio para OpenSCAD."""
     subprocess.run([
         "potrace", "-s", 
         "--unit", "1", 
@@ -83,21 +79,18 @@ module silhouette() {{
     import("{p['svg']}", center=true, dpi=96);
 }}
 
-// 1. PARED DE CORTE
 linear_extrude(height={wh})
     difference() {{
         offset(r={wt}) silhouette();
         silhouette();
     }}
 
-// 2. DETALLES INTERNOS
 linear_extrude(height={detail_h})
     difference() {{
         offset(r=0.4) silhouette();
         offset(r=-0.4) silhouette();
     }}
 
-// 3. SOPORTE DE UNIÓN
 linear_extrude(height=1.0)
     offset(r={wt + 0.8}) silhouette();
 """
@@ -106,15 +99,24 @@ linear_extrude(height=1.0)
         
         subprocess.run(["openscad", "-o", p["stl"], p["scad"]], check=True, timeout=120)
         
+        # Cargamos el mesh para obtener volumen Y dimensiones
         m = mesh.Mesh.from_file(p["stl"])
         volume_mm3, _, _ = m.get_mass_properties()
+        
+        # Cálculo de dimensiones (Bounding Box)
+        minx, maxx = np.min(m.x), np.max(m.x)
+        miny, maxy = np.min(m.y), np.max(m.y)
+        minz, maxz = np.min(m.z), np.max(m.z)
+        dims = [round(maxx - minx, 2), round(maxy - miny, 2), round(maxz - minz, 2)]
+        
         shutil.copy2(p["stl"], str(STL_DIR / f"{output_name}.stl"))
         
         return {
             "exito": True,
             "job_id": output_name,
             "volumen_cm3": round(float(volume_mm3)/1000.0, 4),
-            "mensaje": "¡Sistema restaurado y mejorado!"
+            "dimensiones": dims,  # <--- AQUÍ ESTÁ LA SOLUCIÓN AL ERROR 500
+            "mensaje": "Generado con éxito"
         }
     except Exception as e:
         return {"exito": False, "mensaje": str(e)}
@@ -122,7 +124,6 @@ linear_extrude(height=1.0)
         if work_dir.exists(): shutil.rmtree(work_dir)
 
 def calculate_price(volumen_cm3: float) -> dict:
-    """Calcula el precio según los costos de Gema Makers."""
     v = float(volumen_cm3)
     costo_mat = v * COSTO_FILAMENTO_POR_CM3
     total = (costo_mat + COSTO_BASE) * MARGEN
