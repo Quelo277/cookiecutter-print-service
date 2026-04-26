@@ -126,3 +126,27 @@ linear_extrude(height=1.0)
         return {"exito": False, "mensaje": str(e)}
     finally:
         if work_dir.exists(): shutil.rmtree(work_dir)
+def validate_image(image_path: str) -> Tuple[bool, str]:
+    """Valida que el archivo sea una imagen real y no supere el tamaño."""
+    try:
+        # Verificar que el archivo existe
+        path = Path(image_path)
+        if not path.exists():
+            return False, "El archivo no fue guardado correctamente."
+
+        # Validar tamaño (puedes usar MAX_IMAGE_SIZE_BYTES de config)
+        if path.stat().st_size > (5 * 1024 * 1024): # 5MB de backup si no toma la config
+            return False, "La imagen es demasiado pesada (máx 5MB)."
+
+        # Validar que PIL pueda abrirla
+        with Image.open(image_path) as img:
+            img.verify()
+        return True, "Imagen válida"
+    except Exception as e:
+        return False, f"Archivo de imagen corrupto o no soportado: {str(e)}"
+
+def calculate_price(volumen_cm3: float) -> float:
+    """Calcula el precio final basado en los costos de Gema Makers."""
+    # (Volumen * costo filamento + costo base operacional) * margen de ganancia
+    precio = (volumen_cm3 * COSTO_FILAMENTO_POR_CM3 + COSTO_BASE) * MARGEN
+    return round(precio, 2)
