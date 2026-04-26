@@ -126,6 +126,7 @@ linear_extrude(height=1.0)
         return {"exito": False, "mensaje": str(e)}
     finally:
         if work_dir.exists(): shutil.rmtree(work_dir)
+        
 def validate_image(image_path: str) -> Tuple[bool, str]:
     """Valida que el archivo sea una imagen real y no supere el tamaño."""
     try:
