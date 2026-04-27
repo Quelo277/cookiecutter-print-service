@@ -1,153 +1,434 @@
+"""
+Pipeline de generacion STL para cortantes de galletas.
+CORREGIDO basado en Papooch/cookie-cutter-generator:
+  Imagen → Potrace (SVG) → Inkscape (fill) → OpenSCAD nightly (import SVG + offset + handle) → STL
+
+Errores corregidos vs version anterior:
+- Usa OpenSCAD nightly AppImage (soporte SVG nativo, fast-csg, lazy-union)
+- Usa Inkscape para procesar SVG antes de OpenSCAD (ungroup, object-to-path, path-union)
+- Genera DOS SVGs: original (detalles) + filled (pared exterior)
+- Usa offset() + difference() correctamente para crear la pared delgada
+- Incluye mango/handle para agarrar el cortante
+- Elimina color() que es ignorado en CLI
+- Elimina limpieza agresiva de /tmp que mataba trabajos en curso
+- Usa Xvfb + DISPLAY para renderizado headless
+"""
 import os
 import subprocess
 import shutil
-import time
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
+import numpy as np
 from stl import mesh
 from PIL import Image
-import numpy as np
 
 from app.config import (
-    WALL_HEIGHT, WALL_THICKNESS, STL_DIR, UPLOAD_DIR, PREVIEW_DIR,
-    COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, CURRENCY, CURRENCY_SYMBOL
+    WALL_HEIGHT,
+    WALL_THICKNESS,
+    HANDLE_HEIGHT,
+    HANDLE_THICKNESS,
+    STL_DIR,
+    PREVIEW_DIR,
 )
 
-def _cleanup_vps_disk():
-    """Mantiene el VPS de Gema Makers con espacio suficiente."""
-    now = time.time()
-    for folder in [UPLOAD_DIR, PREVIEW_DIR, Path("/tmp")]:
-        for f in folder.glob("*"):
-            try:
-                if f.is_file() and (now - f.stat().st_mtime) > 900:
-                    if "gema_gen_" in f.name or folder != Path("/tmp"):
-                        f.unlink()
-            except: pass
+
+def validate_image(file_path: str) -> Tuple[bool, str]:
+    """
+    Valida que la imagen sea JPG/PNG y tenga fondo contrastante.
+    Retorna (valido, mensaje).
+    """
+    try:
+        img = Image.open(file_path)
+        if img.format not in ("JPEG", "PNG", "JPG"):
+            return False, f"Formato no soportado: {img.format}. Use JPG o PNG."
+
+        # Verificar contraste basico (imagen no uniforme)
+        img_gray = img.convert("L")
+        arr = np.array(img_gray)
+        std = np.std(arr)
+        if std < 30:
+            return (
+                False,
+                "La imagen tiene muy poco contraste. "
+                "Usa una imagen con fondo claro y figura oscura (o viceversa).",
+            )
+        return True, "OK"
+    except Exception as e:
+        return False, f"Error al procesar la imagen: {str(e)}"
+
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
     """
-    PROCESADO EQUILIBRADO:
-    Mantiene las líneas pero asegura fondo blanco para evitar el monobloque.
+    Binariza la imagen usando ImageMagick.
+    Convierte a escala de grises y aplica threshold para obtener blanco/negro puro.
+    El fondo debe ser negro y la figura blanca para Potrace.
     """
-    subprocess.run([
-        "convert", input_path,
-        "-alpha", "remove", "-background", "white", "-flatten",
-        "-fuzz", "10%", "-trim", "+repage",      # Limpieza de bordes vacíos
-        "-colorspace", "gray",
-        "-level", "25%,75%,1.0",                 # Aumenta el contraste de las líneas
-        "-threshold", "60%",                     # Menos agresivo que 85%
-        "-bordercolor", "white", "-border", "10", # Espacio de seguridad para Potrace
-        output_pnm
-    ], check=True)
+    cmd = [
+        "convert",
+        input_path,
+        "-alpha", "remove",
+        "-background", "white",
+        "-flatten",
+        "-fuzz", "10%",
+        "-trim", "+repage",
+        "-resize", "800x800>",
+        "-colorspace", "Gray",
+        "-brightness-contrast", "0x40",
+        "-threshold", "50%",
+        "-negate",
+        "-bordercolor", "black",
+        "-border", "5",
+        output_pnm,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"ImageMagick error: {result.stderr}")
+
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
-    """Convierte a vector optimizado para OpenSCAD."""
-    subprocess.run([
-        "potrace", "-s", "--unit", "1", 
-        "--turdsize", "20",       # Ignora motas de polvo pequeñas
-        "--alphamax", "0.6",      # Curvas más suaves
-        "-o", output_svg, bnw_pnm
-    ], check=True)
+    """
+    Vectoriza la imagen binarizada usando Potrace a SVG.
+    """
+    cmd = [
+        "potrace",
+        "-s",
+        "--unit", "10",
+        "--turdsize", "10",
+        "--alphamax", "0.6",
+        "--optoncurve", "yes",
+        "-o", output_svg,
+        bnw_pnm,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(f"Potrace error: {result.stderr}")
 
-def image_to_stl(image_path: str, output_name: str, **kwargs) -> dict:
-    _cleanup_vps_disk()
-    wh = float(kwargs.get("wall_height") or WALL_HEIGHT)
-    wt = float(kwargs.get("wall_thickness") or WALL_THICKNESS)
-    detail_height = wh * 0.6 
 
-    work_dir = Path(f"/tmp/gema_gen_{output_name}")
+def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
+    """
+    Genera una version 'filled' del SVG usando Inkscape.
+    Esto une todos los paths en uno solo cerrado y relleno,
+    necesario para que OpenSCAD pueda importar correctamente.
+
+    Basado en generate-fill.sh del repositorio de referencia:
+    https://github.com/Papooch/cookie-cutter-generator
+    """
+    cmd = [
+        "inkscape",
+        "-g",
+        "--actions=" +
+        "mcepl.ungroup-deep.noprefs;" +
+        "select-all;" +
+        "object-to-path;" +
+        "select-all;" +
+        "path-break-apart;" +
+        "select-all;" +
+        "path-union;" +
+        f"export-filename:{output_filled_svg};" +
+        "export-do;" +
+        "quit-immediate;",
+        input_svg,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if not Path(output_filled_svg).exists():
+        raise RuntimeError(f"Inkscape fill error: {result.stderr}")
+
+
+def _generate_scad(
+    original_svg: str,
+    filled_svg: str,
+    scad_path: str,
+    wall_height: float,
+    wall_thickness: float,
+    handle_height: float,
+    handle_thickness: float,
+) -> None:
+    """
+    Genera el archivo OpenSCAD (.scad) que define el cortante.
+
+    Basado en generators/outline.scad del repositorio de referencia.
+    """
+    h_inner = wall_height * 0.8
+    base_offset = wall_thickness * 1.5
+    outer_gap = 0.5
+    handle_h = 2 * h_inner / 3
+
+    scad_code = f"""
+$fa = 5;
+$fs = 0.5;
+
+mirrored = false;
+
+filled = "{filled_svg}";
+original = "{original_svg}";
+
+wall_height = {wall_height};
+wall_thickness = {wall_thickness};
+handle_thickness = {handle_thickness};
+
+h_inner = {h_inner};
+base_offset = {base_offset};
+outer_gap = {outer_gap};
+is_rounded = true;
+
+module import_svg(file) {{
+    scale([mirrored ? -1 : 1, 1, 1])
+    import(file, center = true, $fa = 5);
+}}
+
+module offsetFilled(off) {{
+    offset(off)
+    import_svg(filled);
+}}
+
+module offsetThin(off, thickness) {{
+    difference() {{
+       offsetFilled(off + thickness);
+       offsetFilled(off);
+    }}
+}}
+
+/*********/
+/* Outer */
+/*********/
+gap = outer_gap + base_offset;
+handle_height = {handle_h};
+
+module outer() {{
+    union() {{
+        linear_extrude(handle_height * 1.8)
+            offsetThin(gap, wall_thickness);
+
+        linear_extrude(handle_height / 2)
+            offsetThin(gap, handle_thickness);
+
+        if (is_rounded) {{
+            for (i = [0:0.1:1.4]) {{
+                translate([0, 0, handle_height / 2 + i])
+                    linear_extrude(0.5)
+                    offsetThin(gap, handle_thickness - i*i);
+            }}
+        }} else {{
+            translate([0, 0, handle_height / 2])
+                linear_extrude(1.4)
+                offsetThin(gap, handle_thickness);
+        }}
+    }}
+}}
+
+/*********/
+/* Stamp */
+/*********/
+module stamp() {{
+    translate([0, 0, wall_height * 0.4])
+        linear_extrude(wall_height * 0.5)
+        offset(r = 0.01)
+        import_svg(original);
+
+    translate([0, 0, 0])
+        linear_extrude(wall_height * 0.4)
+        offset(r = base_offset * 0.5)
+        import_svg(original);
+}}
+
+union() {{
+    outer();
+    stamp();
+}}
+"""
+    with open(scad_path, "w") as f:
+        f.write(scad_code)
+
+
+def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = None) -> None:
+    """
+    Renderiza el archivo .scad a STL usando OpenSCAD nightly CLI.
+    Usa --enable=fast-csg y --enable=lazy-union para performance.
+    Necesita Xvfb corriendo (DISPLAY=:5) para headless.
+    """
+    display = os.environ.get("DISPLAY", ":5")
+
+    cmd = [
+        "openscad-nightly",
+        scad_path,
+        "--enable=fast-csg",
+        "--enable=lazy-union",
+        "-o", stl_path,
+        "--export-format=binstl",
+    ]
+
+    env = os.environ.copy()
+    env["DISPLAY"] = display
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"OpenSCAD render error: {result.stderr}")
+    if not Path(stl_path).exists() or stl_path.stat().st_size < 100:
+        raise RuntimeError("OpenSCAD genero un STL vacio o invalido")
+
+    if preview_path:
+        cmd_preview = [
+            "openscad-nightly",
+            scad_path,
+            "--enable=fast-csg",
+            "--enable=lazy-union",
+            "-o", preview_path,
+            "--export-format=png",
+            "--imgsize=600,600",
+            "--camera=0,0,0,55,0,25,140",
+        ]
+        subprocess.run(cmd_preview, capture_output=True, text=True, timeout=120, env=env)
+        if not Path(preview_path).exists():
+            _generate_placeholder_preview(preview_path)
+    else:
+        preview_path = str(PREVIEW_DIR / Path(stl_path).stem) + ".png"
+        _generate_placeholder_preview(preview_path)
+
+
+def _generate_placeholder_preview(preview_path: str) -> None:
+    """Genera una imagen placeholder si OpenSCAD no pudo crear el preview."""
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    from PIL import Image as PILImage
+    img = PILImage.new("RGB", (600, 600), color=(240, 240, 240))
+    img.save(preview_path)
+
+
+def _calculate_volume(stl_path: str) -> Tuple[float, Tuple[float, float, float]]:
+    """
+    Calcula el volumen (en cm3) y dimensiones (en mm) del STL usando numpy-stl.
+    """
+    try:
+        m = mesh.Mesh.from_file(stl_path)
+        volume_mm3, cog, inertia = m.get_mass_properties()
+        volumen_cm3 = volume_mm3 / 1000.0
+
+        minx = m.x.min()
+        maxx = m.x.max()
+        miny = m.y.min()
+        maxy = m.y.max()
+        minz = m.z.min()
+        maxz = m.z.max()
+
+        dims = (maxx - minx, maxy - miny, maxz - minz)
+        return volumen_cm3, dims
+    except Exception as e:
+        raise RuntimeError(f"Error calculando volumen STL: {str(e)}")
+
+
+def image_to_stl(
+    image_path: str,
+    output_name: str,
+    wall_height: Optional[float] = None,
+    wall_thickness: Optional[float] = None,
+    handle_height: Optional[float] = None,
+    handle_thickness: Optional[float] = None,
+) -> dict:
+    """
+    Pipeline completo CORREGIDO:
+    imagen → binarizar → vectorizar (SVG) → inkscape fill → OpenSCAD nightly (offset+handle) → STL
+    """
+    wh = wall_height or WALL_HEIGHT
+    wt = wall_thickness or WALL_THICKNESS
+    hh = handle_height or HANDLE_HEIGHT
+    ht = handle_thickness or HANDLE_THICKNESS
+
+    work_dir = Path(tempfile.gettempdir()) / f"cc_gen_{output_name}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    p = {
-        "pnm": str(work_dir / "temp.pnm"),
-        "svg": str(work_dir / "orig.svg"),
-        "scad": str(work_dir / "model.scad"),
-        "stl": str(work_dir / "model.stl"),
+    paths = {
+        "input_image": image_path,
+        "bnw_pnm": str(work_dir / "input_bw.pnm"),
+        "vector_svg": str(work_dir / "vector.svg"),
+        "filled_svg": str(work_dir / "vector-fill.svg"),
+        "scad_file": str(work_dir / "model.scad"),
+        "stl_file": str(work_dir / "model.stl"),
+        "preview_png": str(PREVIEW_DIR / f"{output_name}.png"),
     }
 
     try:
-        _binarize_image(image_path, p["pnm"])
-        _vectorize_to_svg(p["pnm"], p["svg"])
+        _binarize_image(image_path, paths["bnw_pnm"])
+        _vectorize_to_svg(paths["bnw_pnm"], paths["vector_svg"])
+        _generate_filled_svg(paths["vector_svg"], paths["filled_svg"])
 
-        # LÓGICA SCAD REFORZADA: Evita el monobloque y el objeto vacío
-        scad_code = f"""
-$fn = 20; 
-module silhouette() {{
-    // El offset r=0.01 asegura que OpenSCAD detecte la geometría
-    offset(r=0.01) import("{p['svg']}", center=true, dpi=96);
-}}
+        _generate_scad(
+            paths["vector_svg"],
+            paths["filled_svg"],
+            paths["scad_file"],
+            wall_height=wh,
+            wall_thickness=wt,
+            handle_height=hh,
+            handle_thickness=ht,
+        )
 
-// 1. PARED DE CORTE (Exterior)
-color("orange")
-linear_extrude(height={wh})
-    difference() {{
-        offset(r={wt}) silhouette();
-        silhouette();
-    }}
+        _render_stl(paths["scad_file"], paths["stl_file"], paths["preview_png"])
 
-// 2. STAMP / DETALLES INTERNOS (Sólido interno)
-color("darkorange")
-linear_extrude(height={detail_height})
-    silhouette();
+        volumen_cm3, dimensiones = _calculate_volume(paths["stl_file"])
 
-// 3. BASE DE UNIÓN (Soporte fino de 1mm)
-linear_extrude(height=1.0)
-    offset(r={wt}) silhouette();
-"""
-        with open(p["scad"], "w") as f:
-            f.write(scad_code)
-        
-        # Ejecución con captura de errores
-        res = subprocess.run(["openscad", "-o", p["stl"], p["scad"]], 
-                             capture_output=True, text=True, timeout=120)
-        
-        if res.returncode != 0:
-            return {"exito": False, "mensaje": f"OpenSCAD Error: {res.stderr}"}
+        final_stl = str(STL_DIR / f"{output_name}.stl")
+        shutil.copy2(paths["stl_file"], final_stl)
 
-        m = mesh.Mesh.from_file(p["stl"])
-        volume_mm3, _, _ = m.get_mass_properties()
-        
-        minx, maxx = float(np.min(m.x)), float(np.max(m.x))
-        miny, maxy = float(np.min(m.y)), float(np.max(m.y))
-        minz, maxz = float(np.min(m.z)), float(np.max(m.z))
-        dims = [round(maxx - minx, 2), round(maxy - miny, 2), round(maxz - minz, 2)]
+        if not Path(paths["preview_png"]).exists():
+            _generate_placeholder_preview(paths["preview_png"])
 
-        shutil.copy2(p["stl"], str(STL_DIR / f"{output_name}.stl"))
-        
         return {
+            "stl_path": final_stl,
+            "preview_path": paths["preview_png"],
+            "volumen_cm3": round(volumen_cm3, 4),
+            "dimensiones": [round(d, 2) for d in dimensiones],
             "exito": True,
-            "job_id": output_name,
-            "volumen_cm3": round(float(volume_mm3)/1000.0, 4),
-            "dimensiones": dims,
-            "mensaje": "Generado correctamente"
+            "mensaje": "STL generado exitosamente",
+            "parametros": {
+                "wall_height": wh,
+                "wall_thickness": wt,
+                "handle_height": hh,
+                "handle_thickness": ht,
+            },
         }
 
     except Exception as e:
-        return {"exito": False, "mensaje": str(e)}
+        import traceback
+        return {
+            "stl_path": "",
+            "preview_path": "",
+            "volumen_cm3": 0.0,
+            "dimensiones": [0, 0, 0],
+            "exito": False,
+            "mensaje": f"Error en pipeline STL: {str(e)}\n{traceback.format_exc()}",
+            "parametros": {},
+        }
     finally:
-        if work_dir.exists(): shutil.rmtree(work_dir)
-        
-def validate_image(image_path: str) -> Tuple[bool, str]:
-    """Valida que el archivo sea una imagen real y no supere el tamaño."""
-    try:
-        # Verificar que el archivo existe
-        path = Path(image_path)
-        if not path.exists():
-            return False, "El archivo no fue guardado correctamente."
+        try:
+            if work_dir.exists():
+                shutil.rmtree(work_dir)
+        except Exception:
+            pass
 
-        # Validar tamaño (puedes usar MAX_IMAGE_SIZE_BYTES de config)
-        if path.stat().st_size > (5 * 1024 * 1024): # 5MB de backup si no toma la config
-            return False, "La imagen es demasiado pesada (máx 5MB)."
 
-        # Validar que PIL pueda abrirla
-        with Image.open(image_path) as img:
-            img.verify()
-        return True, "Imagen válida"
-    except Exception as e:
-        return False, f"Archivo de imagen corrupto o no soportado: {str(e)}"
+def calculate_price(volumen_cm3: float) -> dict:
+    """
+    Calcula el precio estimado segun la formula:
+    precio = (volumen_cm3 * costo_filamento_por_cm3 + costo_base) * margen
+    """
+    from app.config import (
+        COSTO_FILAMENTO_POR_CM3,
+        COSTO_BASE,
+        MARGEN,
+        CURRENCY,
+        CURRENCY_SYMBOL,
+    )
 
-def calculate_price(volumen_cm3: float) -> float:
-    """Calcula el precio final basado en los costos de Gema Makers."""
-    # (Volumen * costo filamento + costo base operacional) * margen de ganancia
-    precio = (volumen_cm3 * COSTO_FILAMENTO_POR_CM3 + COSTO_BASE) * MARGEN
-    return round(precio, 2)
+    costo_materiales = volumen_cm3 * COSTO_FILAMENTO_POR_CM3
+    costo_total = (costo_materiales + COSTO_BASE) * MARGEN
+
+    return {
+        "volumen_cm3": round(volumen_cm3, 4),
+        "costo_materiales": round(costo_materiales, 2),
+        "costo_base": COSTO_BASE,
+        "margen": MARGEN,
+        "precio_final": round(costo_total, 2),
+        "moneda": CURRENCY,
+        "simbolo": CURRENCY_SYMBOL,
+        "formula": f"({volumen_cm3:.4f} * {COSTO_FILAMENTO_POR_CM3} + {COSTO_BASE}) * {MARGEN}",
+    }
