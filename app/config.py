@@ -55,16 +55,15 @@ OPENSCAD_TEMPLATES_DIR = BASE_DIR / "openscad_templates"
 # Asegurar que los directorios existen
 for d in [UPLOAD_DIR, STL_DIR, PREVIEW_DIR, Path(DATABASE_PATH).parent]:
     d.mkdir(parents=True, exist_ok=True)
-
-# Validar que OpenSCAD esta disponible
+# Validar que las herramientas de sistema estan disponibles
 def validate_tools():
     """Verifica que las herramientas de sistema necesarias estan instaladas."""
     import shutil
     tools = {
-        "openscad": "OpenSCAD",
+        "inkscape": "Inkscape (SVG processing)",
+        "openscad-nightly": "OpenSCAD nightly (SVG import, fast-csg)",
         "convert": "ImageMagick (convert)",
-        "potrace": "Potrace",
-        "pstoedit": "pstoedit (DXF conversion)",
+        "potrace": "Potrace (bitmap tracing)",
     }
     missing = []
     for cmd, name in tools.items():
