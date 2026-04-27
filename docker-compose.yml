@@ -32,6 +32,8 @@ services:
       - WALL_THICKNESS=1.2
       - HANDLE_HEIGHT=8
       - HANDLE_THICKNESS=3
+            # OpenSCAD headless rendering (Xvfb)
+      - DISPLAY=:5
       # SMTP (opcional - dejar vacio para desactivar)
       - SMTP_HOST=
       - SMTP_PORT=587
