@@ -1,6 +1,6 @@
 # ============================================================
-# CookieCutterPrintService - Dockerfile CORREGIDO v3
-# Fix: Path de Python 3.11 y módulos de Uvicorn
+# CookieCutterPrintService - Dockerfile CORREGIDO v4
+# Fix: Instalación limpia de Python 3.11 y Uvicorn
 # ============================================================
 
 FROM ubuntu:22.04
@@ -10,6 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DISPLAY=:5
 
+###################
+# 📥 Install Libs #
+###################
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -28,16 +31,19 @@ RUN apt-get update && apt-get install -y \
     pstoedit \
     && rm -rf /var/lib/apt/lists/*
 
-# Asegurar que pip use Python 3.11
+# Forzar que pip se instale correctamente para Python 3.11
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
 
+####################
+# 📥 Install Tools #
+####################
 # Inkscape PPA
 RUN add-apt-repository ppa:inkscape.dev/stable && \
     apt-get update && \
     apt-get install -y inkscape && \
     rm -rf /var/lib/apt/lists/*
 
-# OpenSCAD nightly
+# OpenSCAD nightly via OBS
 RUN wget -qO /etc/apt/trusted.gpg.d/obs-openscad-nightly.asc \
         https://files.openscad.org/OBS-Repository-Key.pub && \
     echo "deb https://download.opensuse.org/repositories/home:/t-paul/xUbuntu_22.04/ ./" \
@@ -46,23 +52,26 @@ RUN wget -qO /etc/apt/trusted.gpg.d/obs-openscad-nightly.asc \
     apt-get install -y openscad-nightly && \
     rm -rf /var/lib/apt/lists/*
 
+# Symlinks
 RUN ln -sf /usr/bin/openscad-nightly /usr/local/bin/openscad-nightly && \
     ln -sf /usr/bin/openscad-nightly /usr/local/bin/openscad
 
 WORKDIR /app
 
-# Setup GUI script
-RUN echo '#!/bin/sh\nXvfb :5 -screen 0 800x600x24 -nolisten tcp &\nsleep 2\nexec "$@"' \
-    > /usr/local/bin/with-xvfb && chmod +x /usr/local/bin/with-xvfb
-
-# Instalación de dependencias usando el binario exacto
+###############################
+# 📦 Python dependencies      #
+###############################
 COPY requirements.txt .
+# Instalamos los módulos usando el binario de python3.11 directamente
 RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 
+###############################
+# 📂 Copy application files   #
+###############################
 COPY . .
 
-# Directorios de salida con permisos
-RUN mkdir -p /app/frontend/static/uploads/stls \
+# Directorios de salida con permisos para evitar errores de escritura
+RUN mkdir -p /app/frontend/static/uploads/stl \
     /app/frontend/static/uploads/previews \
     /app/frontend/static/uploads/images \
     /app/db && \
@@ -70,5 +79,5 @@ RUN mkdir -p /app/frontend/static/uploads/stls \
 
 EXPOSE 8000
 
-# CMD Corregido: Lanzamos uvicorn a través del módulo de python3.11 directamente
+# CMD: Arrancamos Xvfb y luego el módulo uvicorn con python3.11
 CMD ["sh", "-c", "Xvfb :5 -screen 0 800x600x24 -nolisten tcp & sleep 5 && python3.11 -m uvicorn app.main:app --host 0.0.0.0 --port 8000"]
