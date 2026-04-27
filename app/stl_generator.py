@@ -1,17 +1,9 @@
 """
 Pipeline de generacion STL para cortantes de galletas.
-CORREGIDO basado en Papooch/cookie-cutter-generator:
-  Imagen → Potrace (SVG) → Inkscape (fill) → OpenSCAD nightly (import SVG + offset + handle) → STL
-
-Errores corregidos vs version anterior:
-- Usa OpenSCAD nightly AppImage (soporte SVG nativo, fast-csg, lazy-union)
-- Usa Inkscape para procesar SVG antes de OpenSCAD (ungroup, object-to-path, path-union)
-- Genera DOS SVGs: original (detalles) + filled (pared exterior)
-- Usa offset() + difference() correctamente para crear la pared delgada
-- Incluye mango/handle para agarrar el cortante
-- Elimina color() que es ignorado en CLI
-- Elimina limpieza agresiva de /tmp que mataba trabajos en curso
-- Usa Xvfb + DISPLAY para renderizado headless
+CORREGIDO v2:
+  - Fix: stl_path.stat() → Path(stl_path).stat() (era AttributeError)
+  - Fix: Inkscape action mcepl.ungroup-deep reemplazado por ungroup estándar
+  - Fix: Detección explícita de "top level object is empty" en stderr de OpenSCAD
 """
 import os
 import subprocess
@@ -36,14 +28,12 @@ from app.config import (
 def validate_image(file_path: str) -> Tuple[bool, str]:
     """
     Valida que la imagen sea JPG/PNG y tenga fondo contrastante.
-    Retorna (valido, mensaje).
     """
     try:
         img = Image.open(file_path)
         if img.format not in ("JPEG", "PNG", "JPG"):
             return False, f"Formato no soportado: {img.format}. Use JPG o PNG."
 
-        # Verificar contraste basico (imagen no uniforme)
         img_gray = img.convert("L")
         arr = np.array(img_gray)
         std = np.std(arr)
@@ -61,8 +51,6 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
 def _binarize_image(input_path: str, output_pnm: str) -> None:
     """
     Binariza la imagen usando ImageMagick.
-    Convierte a escala de grises y aplica threshold para obtener blanco/negro puro.
-    El fondo debe ser negro y la figura blanca para Potrace.
     """
     cmd = [
         "convert",
@@ -108,17 +96,17 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
     """
     Genera una version 'filled' del SVG usando Inkscape.
-    Esto une todos los paths en uno solo cerrado y relleno,
-    necesario para que OpenSCAD pueda importar correctamente.
-
-    Basado en generate-fill.sh del repositorio de referencia:
-    https://github.com/Papooch/cookie-cutter-generator
+    CORREGIDO: reemplaza mcepl.ungroup-deep (extensión de terceros no disponible)
+    por la acción estándar 'ungroup' repetida para asegurar profundidad.
     """
     cmd = [
         "inkscape",
         "-g",
         "--actions=" +
-        "mcepl.ungroup-deep.noprefs;" +
+        "select-all;" +
+        "ungroup;" +
+        "ungroup;" +
+        "ungroup;" +
         "select-all;" +
         "object-to-path;" +
         "select-all;" +
@@ -132,7 +120,10 @@ def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if not Path(output_filled_svg).exists():
-        raise RuntimeError(f"Inkscape fill error: {result.stderr}")
+        raise RuntimeError(
+            f"Inkscape no generó el SVG filled.\n"
+            f"stderr: {result.stderr}\nstdout: {result.stdout}"
+        )
 
 
 def _generate_scad(
@@ -146,8 +137,6 @@ def _generate_scad(
 ) -> None:
     """
     Genera el archivo OpenSCAD (.scad) que define el cortante.
-
-    Basado en generators/outline.scad del repositorio de referencia.
     """
     h_inner = wall_height * 0.8
     base_offset = wall_thickness * 1.5
@@ -244,8 +233,8 @@ union() {{
 def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = None) -> None:
     """
     Renderiza el archivo .scad a STL usando OpenSCAD nightly CLI.
-    Usa --enable=fast-csg y --enable=lazy-union para performance.
-    Necesita Xvfb corriendo (DISPLAY=:5) para headless.
+    CORREGIDO: usa Path(stl_path).stat() en lugar de stl_path.stat() (era AttributeError).
+    CORREGIDO: detecta explícitamente "top level object is empty" en stderr.
     """
     display = os.environ.get("DISPLAY", ":5")
 
@@ -263,10 +252,22 @@ def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = Non
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
 
+    # OpenSCAD puede retornar 0 pero generar geometría vacía
+    if "Current top level object is empty" in result.stderr:
+        raise RuntimeError(
+            f"OpenSCAD generó geometría vacía. "
+            f"El SVG importado puede estar mal formado.\n"
+            f"stderr: {result.stderr}"
+        )
+
     if result.returncode != 0:
-        raise RuntimeError(f"OpenSCAD render error: {result.stderr}")
-    if not Path(stl_path).exists() or stl_path.stat().st_size < 100:
-        raise RuntimeError("OpenSCAD genero un STL vacio o invalido")
+        raise RuntimeError(f"OpenSCAD render error (code {result.returncode}):\n{result.stderr}")
+
+    # CORREGIDO: stl_path es str, necesita Path() para llamar .stat()
+    if not Path(stl_path).exists() or Path(stl_path).stat().st_size < 100:
+        raise RuntimeError(
+            f"OpenSCAD generó un STL vacío o inválido.\nstderr: {result.stderr}"
+        )
 
     if preview_path:
         cmd_preview = [
@@ -326,8 +327,8 @@ def image_to_stl(
     handle_thickness: Optional[float] = None,
 ) -> dict:
     """
-    Pipeline completo CORREGIDO:
-    imagen → binarizar → vectorizar (SVG) → inkscape fill → OpenSCAD nightly (offset+handle) → STL
+    Pipeline completo:
+    imagen → binarizar → vectorizar (SVG) → inkscape fill → OpenSCAD nightly → STL
     """
     wh = wall_height or WALL_HEIGHT
     wt = wall_thickness or WALL_THICKNESS
