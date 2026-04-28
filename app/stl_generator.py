@@ -70,11 +70,11 @@ def _binarize_image(input_path: str, output_pnm: str) -> None:
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
     cmd = [
         "potrace",
-        "-s",
+        "-s",                  # output SVG
         "--unit", "10",
-        "--turdsize", "10",
-        "--alphamax", "0.6",
-        "--optoncurve", "yes",
+        "--turdsize", "10",    # ignorar manchas pequeñas
+        "--alphamax", "0.6",   # suavizado de esquinas
+        "-O", "0.2",           # opttolerance: tolerancia de optimización de curvas
         "-o", output_svg,
         bnw_pnm,
     ]
