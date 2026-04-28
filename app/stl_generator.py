@@ -1,10 +1,9 @@
 """
 Pipeline de generacion STL para cortantes de galletas.
 CORREGIDO v3:
-  - Fix: Eliminada opción '--optoncurve' de Potrace (causaba RuntimeError)
-  - Fix: stl_path.stat() -> Path(stl_path).stat()
+  - Fix: numpy.float32 no serializable por FastAPI → float() explícito en _calculate_volume
+  - Fix: stl_path.stat() → Path(stl_path).stat()
   - Fix: Inkscape action mcepl.ungroup-deep reemplazado por ungroup estándar
-  - Fix: Detección explícita de "top level object is empty" en stderr de OpenSCAD
 """
 import os
 import subprocess
@@ -27,14 +26,10 @@ from app.config import (
 
 
 def validate_image(file_path: str) -> Tuple[bool, str]:
-    """
-    Valida que la imagen sea JPG/PNG y tenga fondo contrastante.
-    """
     try:
         img = Image.open(file_path)
         if img.format not in ("JPEG", "PNG", "JPG"):
             return False, f"Formato no soportado: {img.format}. Use JPG o PNG."
-
         img_gray = img.convert("L")
         arr = np.array(img_gray)
         std = np.std(arr)
@@ -50,9 +45,6 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
 
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
-    """
-    Binariza la imagen usando ImageMagick.
-    """
     cmd = [
         "convert",
         input_path,
@@ -76,17 +68,13 @@ def _binarize_image(input_path: str, output_pnm: str) -> None:
 
 
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
-    """
-    Vectoriza la imagen binarizada usando Potrace a SVG.
-    FIX: Se eliminó '--optoncurve' porque no existe en la versión de Ubuntu 22.04.
-    """
     cmd = [
         "potrace",
         "-s",
         "--unit", "10",
         "--turdsize", "10",
         "--alphamax", "0.6",
-        # "--optoncurve", "yes",  <-- ELIMINADO: CAUSA ERROR
+        "--optoncurve", "yes",
         "-o", output_svg,
         bnw_pnm,
     ]
@@ -97,7 +85,8 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
     """
-    Genera una version 'filled' del SVG usando Inkscape.
+    CORREGIDO: reemplaza mcepl.ungroup-deep (extensión de terceros)
+    por la acción estándar 'ungroup' repetida.
     """
     cmd = [
         "inkscape",
@@ -135,9 +124,6 @@ def _generate_scad(
     handle_height: float,
     handle_thickness: float,
 ) -> None:
-    """
-    Genera el archivo OpenSCAD (.scad) que define el cortante.
-    """
     h_inner = wall_height * 0.8
     base_offset = wall_thickness * 1.5
     outer_gap = 0.5
@@ -178,9 +164,6 @@ module offsetThin(off, thickness) {{
     }}
 }}
 
-/*********/
-/* Outer */
-/*********/
 gap = outer_gap + base_offset;
 handle_height = {handle_h};
 
@@ -206,9 +189,6 @@ module outer() {{
     }}
 }}
 
-/*********/
-/* Stamp */
-/*********/
 module stamp() {{
     translate([0, 0, wall_height * 0.4])
         linear_extrude(wall_height * 0.5)
@@ -231,14 +211,10 @@ union() {{
 
 
 def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = None) -> None:
-    """
-    Renderiza el archivo .scad a STL usando OpenSCAD (nightly via symlink).
-    """
     display = os.environ.get("DISPLAY", ":5")
 
-    # Usamos "openscad" ya que el Dockerfile tiene el symlink
     cmd = [
-        "openscad",
+        "openscad-nightly",
         scad_path,
         "--enable=fast-csg",
         "--enable=lazy-union",
@@ -252,17 +228,25 @@ def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = Non
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
 
     if "Current top level object is empty" in result.stderr:
-        raise RuntimeError(f"OpenSCAD generó geometría vacía. Error: {result.stderr}")
+        raise RuntimeError(
+            f"OpenSCAD generó geometría vacía. El SVG puede estar mal formado.\n"
+            f"stderr: {result.stderr}"
+        )
 
     if result.returncode != 0:
-        raise RuntimeError(f"OpenSCAD render error (code {result.returncode}):\n{result.stderr}")
+        raise RuntimeError(
+            f"OpenSCAD render error (code {result.returncode}):\n{result.stderr}"
+        )
 
+    # CORREGIDO: stl_path es str, se necesita Path() para .stat()
     if not Path(stl_path).exists() or Path(stl_path).stat().st_size < 100:
-        raise RuntimeError(f"OpenSCAD generó un STL vacío o inválido.")
+        raise RuntimeError(
+            f"OpenSCAD generó un STL vacío o inválido.\nstderr: {result.stderr}"
+        )
 
     if preview_path:
         cmd_preview = [
-            "openscad",
+            "openscad-nightly",
             scad_path,
             "--enable=fast-csg",
             "--enable=lazy-union",
@@ -274,10 +258,12 @@ def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = Non
         subprocess.run(cmd_preview, capture_output=True, text=True, timeout=120, env=env)
         if not Path(preview_path).exists():
             _generate_placeholder_preview(preview_path)
+    else:
+        preview_path = str(PREVIEW_DIR / Path(stl_path).stem) + ".png"
+        _generate_placeholder_preview(preview_path)
 
 
 def _generate_placeholder_preview(preview_path: str) -> None:
-    """Genera una imagen placeholder si OpenSCAD no pudo crear el preview."""
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     from PIL import Image as PILImage
     img = PILImage.new("RGB", (600, 600), color=(240, 240, 240))
@@ -285,11 +271,23 @@ def _generate_placeholder_preview(preview_path: str) -> None:
 
 
 def _calculate_volume(stl_path: str) -> Tuple[float, Tuple[float, float, float]]:
+    """
+    CORREGIDO: castea todos los valores numpy a float() nativo de Python.
+    numpy.float32 no es serializable por FastAPI/JSON y causa el error
+    "numpy.float32 object is not iterable".
+    """
     try:
         m = mesh.Mesh.from_file(stl_path)
         volume_mm3, cog, inertia = m.get_mass_properties()
-        volumen_cm3 = volume_mm3 / 1000.0
-        dims = (m.x.max() - m.x.min(), m.y.max() - m.y.min(), m.z.max() - m.z.min())
+
+        # float() convierte numpy.float32/float64 a Python float nativo
+        volumen_cm3 = float(volume_mm3) / 1000.0
+
+        dims = (
+            float(m.x.max()) - float(m.x.min()),
+            float(m.y.max()) - float(m.y.min()),
+            float(m.z.max()) - float(m.z.min()),
+        )
         return volumen_cm3, dims
     except Exception as e:
         raise RuntimeError(f"Error calculando volumen STL: {str(e)}")
@@ -303,10 +301,6 @@ def image_to_stl(
     handle_height: Optional[float] = None,
     handle_thickness: Optional[float] = None,
 ) -> dict:
-    """
-    Pipeline completo de Gema Makers:
-    imagen -> binarizar -> vectorizar (SVG) -> inkscape fill -> OpenSCAD -> STL
-    """
     wh = wall_height or WALL_HEIGHT
     wt = wall_thickness or WALL_THICKNESS
     hh = handle_height or HANDLE_HEIGHT
@@ -316,6 +310,7 @@ def image_to_stl(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     paths = {
+        "input_image": image_path,
         "bnw_pnm": str(work_dir / "input_bw.pnm"),
         "vector_svg": str(work_dir / "vector.svg"),
         "filled_svg": str(work_dir / "vector-fill.svg"),
@@ -330,39 +325,79 @@ def image_to_stl(
         _generate_filled_svg(paths["vector_svg"], paths["filled_svg"])
 
         _generate_scad(
-            paths["vector_svg"], paths["filled_svg"], paths["scad_file"],
-            wh, wt, hh, ht
+            paths["vector_svg"],
+            paths["filled_svg"],
+            paths["scad_file"],
+            wall_height=wh,
+            wall_thickness=wt,
+            handle_height=hh,
+            handle_thickness=ht,
         )
 
         _render_stl(paths["scad_file"], paths["stl_file"], paths["preview_png"])
 
         volumen_cm3, dimensiones = _calculate_volume(paths["stl_file"])
+
         final_stl = str(STL_DIR / f"{output_name}.stl")
         shutil.copy2(paths["stl_file"], final_stl)
+
+        if not Path(paths["preview_png"]).exists():
+            _generate_placeholder_preview(paths["preview_png"])
 
         return {
             "stl_path": final_stl,
             "preview_path": paths["preview_png"],
+            # round() sobre Python float nativo → siempre serializable
             "volumen_cm3": round(volumen_cm3, 4),
-            "dimensiones": [round(d, 2) for d in dimensiones],
+            "dimensiones": [round(float(d), 2) for d in dimensiones],
             "exito": True,
-            "mensaje": "STL generado exitosamente"
+            "mensaje": "STL generado exitosamente",
+            "parametros": {
+                "wall_height": float(wh),
+                "wall_thickness": float(wt),
+                "handle_height": float(hh),
+                "handle_thickness": float(ht),
+            },
         }
+
     except Exception as e:
         import traceback
-        return {"exito": False, "mensaje": f"Error en pipeline STL: {str(e)}\n{traceback.format_exc()}"}
+        return {
+            "stl_path": "",
+            "preview_path": "",
+            "volumen_cm3": 0.0,
+            "dimensiones": [0.0, 0.0, 0.0],
+            "exito": False,
+            "mensaje": f"Error en pipeline STL: {str(e)}\n{traceback.format_exc()}",
+            "parametros": {},
+        }
     finally:
-        if work_dir.exists():
-            shutil.rmtree(work_dir)
+        try:
+            if work_dir.exists():
+                shutil.rmtree(work_dir)
+        except Exception:
+            pass
 
 
 def calculate_price(volumen_cm3: float) -> dict:
-    from app.config import COSTO_FILAMENTO_POR_CM3, COSTO_BASE, MARGEN, CURRENCY, CURRENCY_SYMBOL
-    costo_materiales = volumen_cm3 * COSTO_FILAMENTO_POR_CM3
-    costo_total = (costo_materiales + COSTO_BASE) * MARGEN
+    from app.config import (
+        COSTO_FILAMENTO_POR_CM3,
+        COSTO_BASE,
+        MARGEN,
+        CURRENCY,
+        CURRENCY_SYMBOL,
+    )
+
+    costo_materiales = float(volumen_cm3) * float(COSTO_FILAMENTO_POR_CM3)
+    costo_total = (costo_materiales + float(COSTO_BASE)) * float(MARGEN)
+
     return {
-        "volumen_cm3": round(volumen_cm3, 4),
+        "volumen_cm3": round(float(volumen_cm3), 4),
+        "costo_materiales": round(costo_materiales, 2),
+        "costo_base": float(COSTO_BASE),
+        "margen": float(MARGEN),
         "precio_final": round(costo_total, 2),
         "moneda": CURRENCY,
         "simbolo": CURRENCY_SYMBOL,
+        "formula": f"({volumen_cm3:.4f} * {COSTO_FILAMENTO_POR_CM3} + {COSTO_BASE}) * {MARGEN}",
     }
