@@ -1,9 +1,8 @@
 """
 Pipeline de generacion STL para cortantes de galletas.
-CORREGIDO v3:
-  - Fix: numpy.float32 no serializable por FastAPI → float() explícito en _calculate_volume
-  - Fix: stl_path.stat() → Path(stl_path).stat()
-  - Fix: Inkscape action mcepl.ungroup-deep reemplazado por ungroup estándar
+v4 - DOS PIEZAS SEPARADAS:
+  - Pieza 1: CUTTER  → solo la pared perimetral (silueta) que corta la masa
+  - Pieza 2: STAMP   → base sólida con relieve, calza dentro del cutter con tolerancia
 """
 import os
 import subprocess
@@ -24,6 +23,9 @@ from app.config import (
     PREVIEW_DIR,
 )
 
+# Tolerancia entre stamp y cutter (mm) para que calce sin forzar
+FIT_TOLERANCE = 0.3
+
 
 def validate_image(file_path: str) -> Tuple[bool, str]:
     try:
@@ -32,8 +34,7 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
             return False, f"Formato no soportado: {img.format}. Use JPG o PNG."
         img_gray = img.convert("L")
         arr = np.array(img_gray)
-        std = np.std(arr)
-        if std < 30:
+        if np.std(arr) < 30:
             return (
                 False,
                 "La imagen tiene muy poco contraste. "
@@ -70,11 +71,11 @@ def _binarize_image(input_path: str, output_pnm: str) -> None:
 def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
     cmd = [
         "potrace",
-        "-s",                  # output SVG
+        "-s",
         "--unit", "10",
-        "--turdsize", "10",    # ignorar manchas pequeñas
-        "--alphamax", "0.6",   # suavizado de esquinas
-        "-O", "0.2",           # opttolerance: tolerancia de optimización de curvas
+        "--turdsize", "10",
+        "--alphamax", "0.6",
+        "-O", "0.2",
         "-o", output_svg,
         bnw_pnm,
     ]
@@ -84,10 +85,6 @@ def _vectorize_to_svg(bnw_pnm: str, output_svg: str) -> None:
 
 
 def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
-    """
-    CORREGIDO: reemplaza mcepl.ungroup-deep (extensión de terceros)
-    por la acción estándar 'ungroup' repetida.
-    """
     cmd = [
         "inkscape",
         "-g",
@@ -115,112 +112,151 @@ def _generate_filled_svg(input_svg: str, output_filled_svg: str) -> None:
         )
 
 
-def _generate_scad(
-    original_svg: str,
+def _generate_scad_cutter(
     filled_svg: str,
     scad_path: str,
     wall_height: float,
     wall_thickness: float,
-    handle_height: float,
-    handle_thickness: float,
 ) -> None:
-    h_inner = wall_height * 0.8
-    base_offset = wall_thickness * 1.5
+    """
+    Genera el SCAD para la PIEZA 1: el cortante (cutter).
+    Solo la pared perimetral hueca — es la parte que corta la masa.
+    Incluye un aro de agarre en la parte superior.
+    """
     outer_gap = 0.5
-    handle_h = 2 * h_inner / 3
+    base_offset = wall_thickness * 1.5
+    gap = outer_gap + base_offset
+    handle_h = wall_height * 0.5
+    handle_thickness = wall_thickness * 2.0
 
     scad_code = f"""
 $fa = 5;
 $fs = 0.5;
 
-mirrored = false;
-
 filled = "{filled_svg}";
-original = "{original_svg}";
-
-wall_height = {wall_height};
+wall_height   = {wall_height};
 wall_thickness = {wall_thickness};
 handle_thickness = {handle_thickness};
+gap           = {gap};
+handle_h      = {handle_h};
 
-h_inner = {h_inner};
-base_offset = {base_offset};
-outer_gap = {outer_gap};
-is_rounded = true;
-
-module import_svg(file) {{
-    scale([mirrored ? -1 : 1, 1, 1])
-    import(file, center = true, $fa = 5);
-}}
-
-module offsetFilled(off) {{
+module filled_shape(off) {{
     offset(off)
-    import_svg(filled);
+    import(filled, center = true, $fa = 5);
 }}
 
-module offsetThin(off, thickness) {{
+// Pared delgada = anillo entre offset externo e interno
+module cutter_wall(height, thickness) {{
+    linear_extrude(height)
     difference() {{
-       offsetFilled(off + thickness);
-       offsetFilled(off);
+        filled_shape(gap + thickness);
+        filled_shape(gap);
     }}
 }}
 
-gap = outer_gap + base_offset;
-handle_height = {handle_h};
-
-module outer() {{
-    union() {{
-        linear_extrude(handle_height * 1.8)
-            offsetThin(gap, wall_thickness);
-
-        linear_extrude(handle_height / 2)
-            offsetThin(gap, handle_thickness);
-
-        if (is_rounded) {{
-            for (i = [0:0.1:1.4]) {{
-                translate([0, 0, handle_height / 2 + i])
-                    linear_extrude(0.5)
-                    offsetThin(gap, handle_thickness - i*i);
-            }}
-        }} else {{
-            translate([0, 0, handle_height / 2])
-                linear_extrude(1.4)
-                offsetThin(gap, handle_thickness);
-        }}
+// Aro de agarre en la parte superior (más grueso para agarrar)
+module handle_ring() {{
+    translate([0, 0, wall_height * 0.6])
+    linear_extrude(handle_h)
+    difference() {{
+        filled_shape(gap + handle_thickness);
+        filled_shape(gap);
     }}
-}}
-
-module stamp() {{
-    translate([0, 0, wall_height * 0.4])
-        linear_extrude(wall_height * 0.5)
-        offset(r = 0.01)
-        import_svg(original);
-
-    translate([0, 0, 0])
-        linear_extrude(wall_height * 0.4)
-        offset(r = base_offset * 0.5)
-        import_svg(original);
 }}
 
 union() {{
-    outer();
-    stamp();
+    cutter_wall(wall_height, wall_thickness);
+    handle_ring();
 }}
 """
     with open(scad_path, "w") as f:
         f.write(scad_code)
 
 
-def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = None) -> None:
-    display = os.environ.get("DISPLAY", ":5")
+def _generate_scad_stamp(
+    original_svg: str,
+    filled_svg: str,
+    scad_path: str,
+    wall_height: float,
+    wall_thickness: float,
+) -> None:
+    """
+    Genera el SCAD para la PIEZA 2: el estampador (stamp).
+    Base sólida que calza DENTRO del cutter con tolerancia FIT_TOLERANCE.
+    En la cara inferior tiene las líneas de la figura en relieve para
+    estampar el diseño en la galleta.
+    """
+    outer_gap = 0.5
+    base_offset = wall_thickness * 1.5
+    gap = outer_gap + base_offset
 
+    # El stamp debe ser más chico que el interior del cutter por la tolerancia
+    stamp_offset = gap - FIT_TOLERANCE
+
+    base_h = 2.5          # altura de la base sólida (mm)
+    relief_h = 1.2        # altura del relieve (mm) — las líneas que marcan la galleta
+    total_h = base_h + relief_h
+
+    scad_code = f"""
+$fa = 5;
+$fs = 0.5;
+
+original = "{original_svg}";
+filled   = "{filled_svg}";
+
+stamp_offset = {stamp_offset};
+base_h       = {base_h};
+relief_h     = {relief_h};
+total_h      = {total_h};
+
+module filled_shape(off) {{
+    offset(off)
+    import(filled, center = true, $fa = 5);
+}}
+
+module original_shape() {{
+    import(original, center = true, $fa = 5);
+}}
+
+// Base sólida que calza dentro del cutter
+module stamp_base() {{
+    linear_extrude(base_h)
+    filled_shape(stamp_offset);
+}}
+
+// Relieve de la figura (cara inferior = hacia la galleta)
+// Usamos mirror para que al presionar sobre la masa quede orientado correctamente
+module stamp_relief() {{
+    translate([0, 0, base_h])
+    linear_extrude(relief_h)
+    // El relieve son todas las líneas internas de la figura
+    difference() {{
+        filled_shape(stamp_offset * 0.95);
+        original_shape();
+    }}
+}}
+
+union() {{
+    stamp_base();
+    stamp_relief();
+}}
+"""
+    with open(scad_path, "w") as f:
+        f.write(scad_code)
+
+
+def _run_openscad(scad_path: str, output_path: str, extra_args: list = None) -> None:
+    """Ejecuta OpenSCAD CLI para exportar a STL o PNG."""
+    display = os.environ.get("DISPLAY", ":5")
     cmd = [
         "openscad-nightly",
         scad_path,
         "--enable=fast-csg",
         "--enable=lazy-union",
-        "-o", stl_path,
-        "--export-format=binstl",
+        "-o", output_path,
     ]
+    if extra_args:
+        cmd.extend(extra_args)
 
     env = os.environ.copy()
     env["DISPLAY"] = display
@@ -232,35 +268,14 @@ def _render_stl(scad_path: str, stl_path: str, preview_path: Optional[str] = Non
             f"OpenSCAD generó geometría vacía. El SVG puede estar mal formado.\n"
             f"stderr: {result.stderr}"
         )
-
     if result.returncode != 0:
         raise RuntimeError(
-            f"OpenSCAD render error (code {result.returncode}):\n{result.stderr}"
+            f"OpenSCAD error (code {result.returncode}):\n{result.stderr}"
         )
-
-    # CORREGIDO: stl_path es str, se necesita Path() para .stat()
-    if not Path(stl_path).exists() or Path(stl_path).stat().st_size < 100:
+    if not Path(output_path).exists() or Path(output_path).stat().st_size < 100:
         raise RuntimeError(
-            f"OpenSCAD generó un STL vacío o inválido.\nstderr: {result.stderr}"
+            f"OpenSCAD generó un archivo vacío o inválido.\nstderr: {result.stderr}"
         )
-
-    if preview_path:
-        cmd_preview = [
-            "openscad-nightly",
-            scad_path,
-            "--enable=fast-csg",
-            "--enable=lazy-union",
-            "-o", preview_path,
-            "--export-format=png",
-            "--imgsize=600,600",
-            "--camera=0,0,0,55,0,25,140",
-        ]
-        subprocess.run(cmd_preview, capture_output=True, text=True, timeout=120, env=env)
-        if not Path(preview_path).exists():
-            _generate_placeholder_preview(preview_path)
-    else:
-        preview_path = str(PREVIEW_DIR / Path(stl_path).stem) + ".png"
-        _generate_placeholder_preview(preview_path)
 
 
 def _generate_placeholder_preview(preview_path: str) -> None:
@@ -271,18 +286,10 @@ def _generate_placeholder_preview(preview_path: str) -> None:
 
 
 def _calculate_volume(stl_path: str) -> Tuple[float, Tuple[float, float, float]]:
-    """
-    CORREGIDO: castea todos los valores numpy a float() nativo de Python.
-    numpy.float32 no es serializable por FastAPI/JSON y causa el error
-    "numpy.float32 object is not iterable".
-    """
     try:
         m = mesh.Mesh.from_file(stl_path)
-        volume_mm3, cog, inertia = m.get_mass_properties()
-
-        # float() convierte numpy.float32/float64 a Python float nativo
+        volume_mm3, _, _ = m.get_mass_properties()
         volumen_cm3 = float(volume_mm3) / 1000.0
-
         dims = (
             float(m.x.max()) - float(m.x.min()),
             float(m.y.max()) - float(m.y.min()),
@@ -301,62 +308,103 @@ def image_to_stl(
     handle_height: Optional[float] = None,
     handle_thickness: Optional[float] = None,
 ) -> dict:
-    wh = wall_height or WALL_HEIGHT
-    wt = wall_thickness or WALL_THICKNESS
-    hh = handle_height or HANDLE_HEIGHT
-    ht = handle_thickness or HANDLE_THICKNESS
+    """
+    Pipeline completo — genera DOS STLs:
+      {output_name}_cutter.stl  → pared perimetral (corta la masa)
+      {output_name}_stamp.stl   → base con relieve (estampa el diseño)
+    """
+    wh = float(wall_height or WALL_HEIGHT)
+    wt = float(wall_thickness or WALL_THICKNESS)
 
     work_dir = Path(tempfile.gettempdir()) / f"cc_gen_{output_name}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     paths = {
-        "input_image": image_path,
-        "bnw_pnm": str(work_dir / "input_bw.pnm"),
-        "vector_svg": str(work_dir / "vector.svg"),
-        "filled_svg": str(work_dir / "vector-fill.svg"),
-        "scad_file": str(work_dir / "model.scad"),
-        "stl_file": str(work_dir / "model.stl"),
-        "preview_png": str(PREVIEW_DIR / f"{output_name}.png"),
+        "bnw_pnm":        str(work_dir / "input_bw.pnm"),
+        "vector_svg":     str(work_dir / "vector.svg"),
+        "filled_svg":     str(work_dir / "vector-fill.svg"),
+        "scad_cutter":    str(work_dir / "cutter.scad"),
+        "scad_stamp":     str(work_dir / "stamp.scad"),
+        "stl_cutter_tmp": str(work_dir / "cutter.stl"),
+        "stl_stamp_tmp":  str(work_dir / "stamp.stl"),
+        "stl_cutter":     str(STL_DIR / f"{output_name}_cutter.stl"),
+        "stl_stamp":      str(STL_DIR / f"{output_name}_stamp.stl"),
+        "preview_cutter": str(PREVIEW_DIR / f"{output_name}_cutter.png"),
+        "preview_stamp":  str(PREVIEW_DIR / f"{output_name}_stamp.png"),
     }
 
     try:
+        # 1. Imagen → binarizar → vectorizar
         _binarize_image(image_path, paths["bnw_pnm"])
         _vectorize_to_svg(paths["bnw_pnm"], paths["vector_svg"])
         _generate_filled_svg(paths["vector_svg"], paths["filled_svg"])
 
-        _generate_scad(
-            paths["vector_svg"],
-            paths["filled_svg"],
-            paths["scad_file"],
+        # 2. Generar SCAD para cada pieza
+        _generate_scad_cutter(
+            filled_svg=paths["filled_svg"],
+            scad_path=paths["scad_cutter"],
             wall_height=wh,
             wall_thickness=wt,
-            handle_height=hh,
-            handle_thickness=ht,
+        )
+        _generate_scad_stamp(
+            original_svg=paths["vector_svg"],
+            filled_svg=paths["filled_svg"],
+            scad_path=paths["scad_stamp"],
+            wall_height=wh,
+            wall_thickness=wt,
         )
 
-        _render_stl(paths["scad_file"], paths["stl_file"], paths["preview_png"])
+        # 3. Renderizar STLs
+        _run_openscad(
+            paths["scad_cutter"],
+            paths["stl_cutter_tmp"],
+            ["--export-format=binstl"],
+        )
+        _run_openscad(
+            paths["scad_stamp"],
+            paths["stl_stamp_tmp"],
+            ["--export-format=binstl"],
+        )
 
-        volumen_cm3, dimensiones = _calculate_volume(paths["stl_file"])
+        # 4. Calcular volúmenes
+        vol_cutter, dims_cutter = _calculate_volume(paths["stl_cutter_tmp"])
+        vol_stamp, _            = _calculate_volume(paths["stl_stamp_tmp"])
 
-        final_stl = str(STL_DIR / f"{output_name}.stl")
-        shutil.copy2(paths["stl_file"], final_stl)
+        # 5. Copiar a directorio final
+        shutil.copy2(paths["stl_cutter_tmp"], paths["stl_cutter"])
+        shutil.copy2(paths["stl_stamp_tmp"],  paths["stl_stamp"])
 
-        if not Path(paths["preview_png"]).exists():
-            _generate_placeholder_preview(paths["preview_png"])
+        # 6. Previews (PNG)
+        for scad, preview in [
+            (paths["scad_cutter"], paths["preview_cutter"]),
+            (paths["scad_stamp"],  paths["preview_stamp"]),
+        ]:
+            try:
+                _run_openscad(scad, preview, [
+                    "--export-format=png",
+                    "--imgsize=600,600",
+                    "--camera=0,0,0,55,0,25,140",
+                ])
+            except Exception:
+                _generate_placeholder_preview(preview)
 
         return {
-            "stl_path": final_stl,
-            "preview_path": paths["preview_png"],
-            # round() sobre Python float nativo → siempre serializable
-            "volumen_cm3": round(volumen_cm3, 4),
-            "dimensiones": [round(float(d), 2) for d in dimensiones],
+            "stl_path":         paths["stl_cutter"],
+            "stl_cutter_path":  paths["stl_cutter"],
+            "stl_stamp_path":   paths["stl_stamp"],
+            "preview_path":     paths["preview_cutter"],
+            "preview_cutter":   paths["preview_cutter"],
+            "preview_stamp":    paths["preview_stamp"],
+            "volumen_cm3":      round(vol_cutter + vol_stamp, 4),
+            "volumen_cutter_cm3": round(vol_cutter, 4),
+            "volumen_stamp_cm3":  round(vol_stamp, 4),
+            "dimensiones":      [round(float(d), 2) for d in dims_cutter],
             "exito": True,
-            "mensaje": "STL generado exitosamente",
+            "mensaje": "DOS piezas generadas: cutter (silueta) + stamp (estampador con relieve)",
             "parametros": {
-                "wall_height": float(wh),
-                "wall_thickness": float(wt),
-                "handle_height": float(hh),
-                "handle_thickness": float(ht),
+                "wall_height":    wh,
+                "wall_thickness": wt,
+                "fit_tolerance":  FIT_TOLERANCE,
             },
         }
 
@@ -364,8 +412,14 @@ def image_to_stl(
         import traceback
         return {
             "stl_path": "",
+            "stl_cutter_path": "",
+            "stl_stamp_path": "",
             "preview_path": "",
+            "preview_cutter": "",
+            "preview_stamp": "",
             "volumen_cm3": 0.0,
+            "volumen_cutter_cm3": 0.0,
+            "volumen_stamp_cm3": 0.0,
             "dimensiones": [0.0, 0.0, 0.0],
             "exito": False,
             "mensaje": f"Error en pipeline STL: {str(e)}\n{traceback.format_exc()}",
@@ -387,17 +441,15 @@ def calculate_price(volumen_cm3: float) -> dict:
         CURRENCY,
         CURRENCY_SYMBOL,
     )
-
     costo_materiales = float(volumen_cm3) * float(COSTO_FILAMENTO_POR_CM3)
     costo_total = (costo_materiales + float(COSTO_BASE)) * float(MARGEN)
-
     return {
-        "volumen_cm3": round(float(volumen_cm3), 4),
-        "costo_materiales": round(costo_materiales, 2),
-        "costo_base": float(COSTO_BASE),
-        "margen": float(MARGEN),
-        "precio_final": round(costo_total, 2),
-        "moneda": CURRENCY,
-        "simbolo": CURRENCY_SYMBOL,
+        "volumen_cm3":       round(float(volumen_cm3), 4),
+        "costo_materiales":  round(costo_materiales, 2),
+        "costo_base":        float(COSTO_BASE),
+        "margen":            float(MARGEN),
+        "precio_final":      round(costo_total, 2),
+        "moneda":            CURRENCY,
+        "simbolo":           CURRENCY_SYMBOL,
         "formula": f"({volumen_cm3:.4f} * {COSTO_FILAMENTO_POR_CM3} + {COSTO_BASE}) * {MARGEN}",
     }
