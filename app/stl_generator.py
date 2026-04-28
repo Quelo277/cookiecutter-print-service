@@ -46,6 +46,13 @@ def validate_image(file_path: str) -> Tuple[bool, str]:
 
 
 def _binarize_image(input_path: str, output_pnm: str) -> None:
+    """
+    Binariza la imagen para Potrace.
+    CORREGIDO: SIN -negate. Potrace traza pixels NEGROS.
+    Con -negate el fondo quedaba negro y Potrace trazaba el fondo
+    (rectángulo gigante) en lugar de la figura.
+    La imagen debe tener figura oscura sobre fondo claro (validado antes).
+    """
     cmd = [
         "convert",
         input_path,
@@ -58,8 +65,8 @@ def _binarize_image(input_path: str, output_pnm: str) -> None:
         "-colorspace", "Gray",
         "-brightness-contrast", "0x40",
         "-threshold", "50%",
-        "-negate",
-        "-bordercolor", "black",
+        # SIN -negate: figura queda negra (trazada por Potrace), fondo blanco (ignorado)
+        "-bordercolor", "white",   # borde blanco = no se traza
         "-border", "5",
         output_pnm,
     ]
