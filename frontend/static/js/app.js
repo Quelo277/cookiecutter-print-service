@@ -1,26 +1,20 @@
 /**
  * CookieCutterPrintService - Frontend Logic
- * Maneja upload, preview 3D con Three.js, presupuesto y pedidos.
+ * v4: soporte para dos piezas (cutter + stamp)
  */
 
-// ============================================================
-// Estado global
-// ============================================================
 let currentJob = null;
 let scene, camera, renderer, controls, stlMesh;
 
-// ============================================================
-// DOM Elements
-// ============================================================
-const uploadZone = document.getElementById('upload-zone');
-const fileInput = document.getElementById('file-input');
-const previewImage = document.getElementById('preview-image');
-const btnGenerate = document.getElementById('btn-generate');
-const paramsToggle = document.getElementById('params-toggle');
-const paramsGrid = document.getElementById('params-grid');
-const stepResult = document.getElementById('step-result');
-const stepSuccess = document.getElementById('step-success');
-const orderForm = document.getElementById('order-form');
+const uploadZone    = document.getElementById('upload-zone');
+const fileInput     = document.getElementById('file-input');
+const previewImage  = document.getElementById('preview-image');
+const btnGenerate   = document.getElementById('btn-generate');
+const paramsToggle  = document.getElementById('params-toggle');
+const paramsGrid    = document.getElementById('params-grid');
+const stepResult    = document.getElementById('step-result');
+const stepSuccess   = document.getElementById('step-success');
+const orderForm     = document.getElementById('order-form');
 
 // ============================================================
 // Upload - Drag & Drop
@@ -57,7 +51,6 @@ function handleFile(file) {
         showToast('Archivo demasiado grande. Max: 10 MB', 'error');
         return;
     }
-
     const reader = new FileReader();
     reader.onload = (e) => {
         previewImage.src = e.target.result;
@@ -65,7 +58,6 @@ function handleFile(file) {
         uploadZone.querySelector('.upload-content').classList.add('hidden');
     };
     reader.readAsDataURL(file);
-
     uploadZone.dataset.file = 'ready';
     btnGenerate.disabled = false;
     showToast('Imagen cargada. Haz clic en "Generar cortante".', 'info');
@@ -84,16 +76,12 @@ btnGenerate.addEventListener('click', async () => {
         showToast('Selecciona una imagen primero.', 'error');
         return;
     }
-
     setLoading(btnGenerate, true);
-
     try {
         const formData = new FormData();
         formData.append('file', fileInput.files[0]);
-
         const wh = document.getElementById('wall-height').value;
         const wt = document.getElementById('wall-thickness').value;
-        
         if (wh) formData.append('wall_height', wh);
         if (wt) formData.append('wall_thickness', wt);
 
@@ -101,26 +89,22 @@ btnGenerate.addEventListener('click', async () => {
             method: 'POST',
             body: formData,
         });
-
         const data = await res.json();
-
         if (!res.ok || !data.exito) {
             throw new Error(data.detail || data.mensaje || 'Error desconocido');
         }
 
         currentJob = data;
-
-        // Mostrar resultados (ESTO ES LO QUE ARREGLAMOS)
         displayResults(data);
-        
+
         stepResult.classList.remove('hidden');
         stepResult.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-        // Cargar preview 3D
+        // Preview 3D: cargamos el cutter
         initThreeJS();
-        loadSTL(data.job_id);
+        loadSTL(data.stl_cutter_url);
 
-        showToast('Presupuesto generado exitosamente!', 'success');
+        showToast('¡Presupuesto generado! Dos piezas listas para descargar.', 'success');
 
     } catch (err) {
         console.error(err);
@@ -131,50 +115,64 @@ btnGenerate.addEventListener('click', async () => {
 });
 
 function displayResults(data) {
-    // Specs - Validamos que existan antes de toFixed
+    // Volumen y dimensiones
     const vol = data.volumen_cm3 || 0;
     document.getElementById('spec-volume').textContent = vol.toFixed(4) + ' cm³';
-    
-    // Dimensiones (vienen como array [x,y,z] en el nuevo stl_generator)
-    const d = data.dimensiones || [0,0,0];
-    document.getElementById('spec-dims').textContent = `${d[0].toFixed(1)} x ${d[1].toFixed(1)} x ${d[2].toFixed(1)} mm`;
 
-    // Precio - Sincronizado con el backend
+    const d = data.dimensiones_mm || data.dimensiones || [0, 0, 0];
+    document.getElementById('spec-dims').textContent =
+        `${d[0].toFixed(1)} x ${d[1].toFixed(1)} x ${d[2].toFixed(1)} mm`;
+
+    // Precio
     const p = data.precio || {};
     const simb = p.simbolo || '$';
-    
-    // Asignamos valores con fallbacks para evitar errores de undefined
-    document.getElementById('price-materials').textContent = `${simb}${(p.costo_materiales || 0).toFixed(2)}`;
-    
-    // Estos campos podrían no venir en el JSON simplificado, ponemos 0 o el valor por defecto
-    const base = p.costo_base || 0;
-    const marg = p.margen || 1;
+    document.getElementById('price-materials').textContent =
+        `${simb}${(p.costo_materiales || 0).toFixed(2)}`;
+
+    const base  = p.costo_base  || 0;
+    const marg  = p.margen      || 1;
     const final = p.precio_final || 0;
 
-    if(document.getElementById('price-base')) document.getElementById('price-base').textContent = `${simb}${base.toFixed(2)}`;
-    if(document.getElementById('price-margin')) document.getElementById('price-margin').textContent = `x${marg}`;
-    
-    document.getElementById('price-total').textContent = `${simb}${final.toFixed(2)} ${p.moneda || 'ARS'}`;
+    const elBase   = document.getElementById('price-base');
+    const elMargin = document.getElementById('price-margin');
+    if (elBase)   elBase.textContent   = `${simb}${base.toFixed(2)}`;
+    if (elMargin) elMargin.textContent = `x${marg}`;
 
-    // Download link
-    document.getElementById('download-stl').href = data.stl_url;
+    document.getElementById('price-total').textContent =
+        `${simb}${final.toFixed(2)} ${p.moneda || 'ARS'}`;
+
+    // Botones de descarga — dos piezas
+    const btnCutter = document.getElementById('download-cutter');
+    const btnStamp  = document.getElementById('download-stamp');
+
+    if (btnCutter) {
+        btnCutter.href = data.stl_cutter_url || data.stl_url || '#';
+    }
+    if (btnStamp) {
+        btnStamp.href = data.stl_stamp_url || '#';
+    }
+
+    // Compatibilidad con HTML viejo que solo tiene #download-stl
+    const btnOld = document.getElementById('download-stl');
+    if (btnOld) {
+        btnOld.href = data.stl_cutter_url || data.stl_url || '#';
+    }
 }
 
 // ============================================================
-// Three.js - Visor 3D STL (Sin cambios, es robusto)
+// Three.js - Visor 3D STL
 // ============================================================
 function initThreeJS() {
     const container = document.getElementById('threejs-container');
     if (!container) return;
 
-    const width = container.clientWidth;
-    const height = container.clientHeight;
+    const width  = container.clientWidth  || 400;
+    const height = container.clientHeight || 300;
 
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf0f0f0);
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambientLight);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
     dirLight.position.set(10, 20, 10);
@@ -191,28 +189,33 @@ function initThreeJS() {
 
     controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.autoRotate = true;
+    controls.autoRotate    = true;
 
     animate();
 }
 
 function animate() {
     requestAnimationFrame(animate);
-    if (controls) controls.update();
+    if (controls)  controls.update();
     if (renderer && scene && camera) renderer.render(scene, camera);
 }
 
-function loadSTL(jobId) {
-    if (!scene) return;
+/**
+ * Carga un STL desde una URL completa (no solo job_id).
+ * CORREGIDO: recibe la URL directamente en lugar de construirla.
+ */
+function loadSTL(stlUrl) {
+    if (!scene || !stlUrl || stlUrl === '#') return;
     const loader = new THREE.STLLoader();
-    
-    // Intentamos cargar el archivo directamente usando la URL de descarga
-    loader.load(`/api/download/${jobId}.stl`, (geometry) => {
-        displayGeometry(geometry);
-    }, undefined, (err) => {
-        console.error('Error cargando STL:', err);
-        showToast('No se pudo cargar el preview 3D', 'error');
-    });
+    loader.load(
+        stlUrl,
+        (geometry) => displayGeometry(geometry),
+        undefined,
+        (err) => {
+            console.error('Error cargando STL:', err);
+            showToast('No se pudo cargar el preview 3D', 'warning');
+        }
+    );
 }
 
 function displayGeometry(geometry) {
@@ -229,6 +232,7 @@ function displayGeometry(geometry) {
 
     stlMesh = new THREE.Mesh(geometry, material);
     geometry.computeBoundingBox();
+
     const center = new THREE.Vector3();
     geometry.boundingBox.getCenter(center);
     stlMesh.position.sub(center);
@@ -236,7 +240,7 @@ function displayGeometry(geometry) {
     const size = new THREE.Vector3();
     geometry.boundingBox.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z);
-    const scale = 60 / maxDim;
+    const scale  = 60 / maxDim;
     stlMesh.scale.set(scale, scale, scale);
 
     scene.add(stlMesh);
@@ -255,17 +259,13 @@ orderForm.addEventListener('submit', async (e) => {
 
     try {
         const formData = new FormData();
-        formData.append('job_id', currentJob.job_id);
-        formData.append('nombre', document.getElementById('order-name').value);
-        formData.append('email', document.getElementById('order-email').value);
-        formData.append('telefono', document.getElementById('order-phone').value || '');
-        formData.append('aceptar', 'true');
+        formData.append('job_id',    currentJob.job_id);
+        formData.append('nombre',    document.getElementById('order-name').value);
+        formData.append('email',     document.getElementById('order-email').value);
+        formData.append('telefono',  document.getElementById('order-phone').value || '');
+        formData.append('aceptar',   'true');
 
-        const res = await fetch('/api/order', {
-            method: 'POST',
-            body: formData,
-        });
-
+        const res  = await fetch('/api/order', { method: 'POST', body: formData });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Error en pedido');
 
@@ -277,7 +277,6 @@ orderForm.addEventListener('submit', async (e) => {
             <p><strong>Pedido:</strong> #${data.order_id}</p>
             <p><strong>Total:</strong> ${data.simbolo}${data.precio_final.toFixed(2)}</p>
         `;
-
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     } finally {
@@ -285,23 +284,26 @@ orderForm.addEventListener('submit', async (e) => {
     }
 });
 
+// ============================================================
+// Helpers
+// ============================================================
 function setLoading(btn, loading) {
-    const text = btn.querySelector('.btn-text');
+    const text   = btn.querySelector('.btn-text');
     const loader = btn.querySelector('.btn-loader');
     if (loading) {
         btn.disabled = true;
-        if(text) text.classList.add('hidden');
-        if(loader) loader.classList.remove('hidden');
+        if (text)   text.classList.add('hidden');
+        if (loader) loader.classList.remove('hidden');
     } else {
         btn.disabled = false;
-        if(text) text.classList.remove('hidden');
-        if(loader) loader.classList.add('hidden');
+        if (text)   text.classList.remove('hidden');
+        if (loader) loader.classList.add('hidden');
     }
 }
 
 function showToast(message, type = 'info') {
     const container = document.getElementById('toast-container');
-    if(!container) { alert(message); return; }
+    if (!container) { alert(message); return; }
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.textContent = message;
@@ -310,5 +312,5 @@ function showToast(message, type = 'info') {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('Gema Makers - Cookie Cutter Service Ready');
+    console.log('Gema Makers - Cookie Cutter Service Ready v4');
 });
