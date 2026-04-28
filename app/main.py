@@ -13,19 +13,19 @@ app = FastAPI(title="Gema Makers STL Service")
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 templates = Jinja2Templates(directory="frontend/templates")
 
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    # LA SOLUCIÓN: Pasamos 'request' como primer argumento del contexto 
-    # o directamente a la función según la versión de Starlette.
     return templates.TemplateResponse(
-        request=request, 
-        name="index.html", 
+        request=request,
+        name="index.html",
         context={
-            "currency": CURRENCY, 
-            "currency_symbol": CURRENCY_SYMBOL, 
-            "public_url": PUBLIC_URL
-        }
+            "currency": CURRENCY,
+            "currency_symbol": CURRENCY_SYMBOL,
+            "public_url": PUBLIC_URL,
+        },
     )
+
 
 @app.post("/api/upload")
 async def upload_image(
@@ -38,30 +38,56 @@ async def upload_image(
     upload_path = UPLOAD_DIR / f"{job_id}{ext}"
 
     contents = await file.read()
+    if len(contents) > MAX_IMAGE_SIZE_BYTES:
+        raise HTTPException(400, f"Imagen demasiado grande (máx {MAX_IMAGE_SIZE_BYTES // 1024 // 1024} MB)")
+
     with open(upload_path, "wb") as f:
         f.write(contents)
 
     valido, mensaje = validate_image(str(upload_path))
-    if not valido: raise HTTPException(400, mensaje)
+    if not valido:
+        raise HTTPException(400, mensaje)
 
-    res = image_to_stl(str(upload_path), job_id, wall_height=wall_height, wall_thickness=wall_thickness)
+    res = image_to_stl(
+        str(upload_path),
+        job_id,
+        wall_height=wall_height,
+        wall_thickness=wall_thickness,
+    )
 
-    if not res["exito"]: raise HTTPException(500, res["mensaje"])
+    if not res["exito"]:
+        raise HTTPException(500, res["mensaje"])
 
     return {
-        "job_id": job_id,
-        "stl_url": f"/api/download/{job_id}.stl",
-        "preview_url": f"/static/uploads/previews/{job_id}.png",
-        "volumen_cm3": res["volumen_cm3"],
-        "dimensiones_mm": res["dimensiones"],
-        "precio": calculate_price(res["volumen_cm3"]),
-        "exito": True
+        "job_id":       job_id,
+        # URLs de descarga para ambas piezas
+        "stl_url":          f"/api/download/{job_id}_cutter.stl",
+        "stl_cutter_url":   f"/api/download/{job_id}_cutter.stl",
+        "stl_stamp_url":    f"/api/download/{job_id}_stamp.stl",
+        # Previews
+        "preview_url":          f"/static/uploads/previews/{job_id}_cutter.png",
+        "preview_cutter_url":   f"/static/uploads/previews/{job_id}_cutter.png",
+        "preview_stamp_url":    f"/static/uploads/previews/{job_id}_stamp.png",
+        # Volúmenes
+        "volumen_cm3":          res["volumen_cm3"],
+        "volumen_cutter_cm3":   res["volumen_cutter_cm3"],
+        "volumen_stamp_cm3":    res["volumen_stamp_cm3"],
+        "dimensiones_mm":       res["dimensiones"],
+        "precio":               calculate_price(res["volumen_cm3"]),
+        "mensaje":              res["mensaje"],
+        "exito":                True,
     }
+
 
 @app.get("/api/download/{filename}")
 async def download(filename: str):
     from app.config import STL_DIR
-    return FileResponse(STL_DIR / filename)
+    filepath = STL_DIR / filename
+    if not filepath.exists():
+        raise HTTPException(404, f"Archivo no encontrado: {filename}")
+    return FileResponse(filepath, filename=filename)
+
 
 @app.get("/health")
-async def health(): return {"status": "ok"}
+async def health():
+    return {"status": "ok"}
